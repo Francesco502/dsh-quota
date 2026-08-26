@@ -73,6 +73,16 @@ pwsh -File .github/scripts/validate-release.ps1 -Tag v0.1.0
 
 ---
 
+## 📚 详细文档
+
+- [系统架构与实现原理](./docs/ARCHITECTURE.md)
+- [新 Provider 扩展接入指南](./docs/PROVIDERS.md)
+- [常见问题与解答 (FAQ)](./docs/FAQ.md)
+- [版本管理与发布标准规范](./VERSIONING.md)
+- [版本更新日志](./CHANGELOG.md)
+
+---
+
 ## 📄 开源协议
 
 [Apache-2.0](./LICENSE)
