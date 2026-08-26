@@ -40,6 +40,7 @@
     "build:client": "node bundle-client.mjs",
     "build": "node bundle-host.mjs && node bundle-client.mjs",
     "prepack": "node bundle-host.mjs && node bundle-client.mjs",
+    "test": "node tests/run.mjs",
     "validate:release": "pwsh -File .github/scripts/validate-release.ps1"
   },
   "keywords": [
