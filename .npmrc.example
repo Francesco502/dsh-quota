@@ -1,0 +1,2 @@
+# npm configuration template for @francescoli scoped packages
+//registry.npmjs.org/:_authToken=${NPM_TOKEN}
