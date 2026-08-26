@@ -1,6 +1,7 @@
-# dsh-quota: DSH AI 额度与用量监控插件
+# @francesco502/dsh-quota: DSH AI 额度与用量监控插件
 
 [![version](https://img.shields.io/badge/version-v0.1.0-blue.svg)](./package.json)
+[![npm](https://img.shields.io/badge/npm-@francesco502/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francesco502/dsh-quota)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
 > 当前版本：**v0.1.0**
@@ -16,9 +17,9 @@
    - **Codex / OpenAI**：支持官方 OpenAI API 或第三方聚合分发格式（NewAPI / OneAPI），统计当月消费与总限额；
    - **Google Antigravity**：实时跟踪 Antigravity Pro 配额与已用 Tokens；
    - **OpenCode-Go**：监控 OpenCode 订阅算力与重置倒计时。
-2. **直观前端看板**：
-   - 深度融入 DSH Web GUI 侧边栏，支持一键呼出/收起；
-   - 卡片式进度条与实时状态指示；
+2. **直观前端看板与 HUD 浮窗**：
+   - 深度融入 DSH Web GUI 侧边栏与 HUD 状态栏，支持一键呼出/收起；
+   - 卡片式进度条与宋代青绿雅致状态指示；
    - 内置前端配置表单，支持随时修改或添加平台凭据与自定义 Base URL。
 3. **安全与性能**：
    - 配置文件严格保存在本地 `~/.dsh/quota-config.json`（权限 `0600`）；
@@ -35,10 +36,10 @@
 3. 搜索 `dsh-quota` 并点击 **安装 (Install)**；
 4. 刷新网页即可在侧边栏看到「额度监控」入口。
 
-### 方式二：通过 DSH CLI (npm 模式) 安装
+### 方式二：通过 DSH CLI (npm Scoped 模式) 安装
 
 ```bash
-dsh plugin --profile web add dsh-quota
+dsh plugin --profile web add @francesco502/dsh-quota
 ```
 
 ### 方式三：通过 GitHub 源码链接安装

@@ -1,5 +1,5 @@
 {
-  "name": "dsh-quota",
+  "name": "@francesco502/dsh-quota",
   "version": "0.1.0",
   "description": "AI Quota and Token Usage Monitor for DeepSeek Harness (Codex, Cursor, Antigravity, OpenCode-Go)",
   "type": "module",
@@ -8,6 +8,10 @@
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dsh": {
     "bundle": {
