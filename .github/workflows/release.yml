@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build bundles
+        run: npm run build
+
+      - name: Validate release metadata
+        shell: pwsh
+        run: |
+          & .github\scripts\validate-release.ps1 -Tag $env:GITHUB_REF_NAME
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $distDir = Join-Path $PWD "dist"
+          if (Test-Path $distDir) { Remove-Item -Recurse -Force $distDir }
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+          # 1. 生成 npm 规范分发包
+          npm pack --pack-destination "$distDir"
+
+          # 2. 生成编译产物压缩包
+          $bundleZipPath = Join-Path $distDir "dsh-quota-bundles.zip"
+          Compress-Archive -Path "lib", "cordis.patch.yml", "package.json", "README.md", "LICENSE" -DestinationPath $bundleZipPath -Force
+
+          # 3. 计算 SHA-256 校验和并生成 release-manifest.json
+          $assetList = @()
+          foreach ($file in (Get-ChildItem -LiteralPath $distDir -File)) {
+              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+              $shaFile = "$($file.FullName).sha256"
+              "$hash  $($file.Name)" | Set-Content -LiteralPath $shaFile -Encoding ascii -NoNewline
+              $assetList += [ordered]@{
+                  name = $file.Name
+                  sha256 = $hash
+                  type = switch -Wildcard ($file.Name) {
+                      "*.tgz" { "application/gzip" }
+                      "*.zip" { "application/zip" }
+                      default { "application/octet-stream" }
+                  }
+              }
+          }
+
+          $tagVersion = $env:GITHUB_REF_NAME.TrimStart("v")
+          $manifest = [ordered]@{
+              schema_version = 1
+              project = "Francesco502/dsh-quota"
+              version = $tagVersion
+              tag = $env:GITHUB_REF_NAME
+              commit = $env:GITHUB_SHA
+              generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+              assets = $assetList
+          }
+
+          $manifestPath = Join-Path $distDir "release-manifest.json"
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+          Write-Output "Prepared release assets in $distDir:"
+          Get-ChildItem -LiteralPath $distDir | Select-Object Name, Length
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $repository = "Francesco502/dsh-quota"
+          $distDir = Join-Path $PWD "dist"
+          $headers = @{
+            Accept = "application/vnd.github+json"
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "User-Agent" = "dsh-quota-release"
+          }
+          $releaseApi = "https://api.github.com/repos/$repository/releases"
+          $releaseBody = @{
+            tag_name = $env:GITHUB_REF_NAME
+            name = "dsh-quota $env:GITHUB_REF_NAME"
+            generate_release_notes = $true
+          } | ConvertTo-Json
+          $release = Invoke-RestMethod -Method Post -Uri $releaseApi -Headers $headers -ContentType "application/json" -Body $releaseBody
+          $uploadApi = $release.upload_url.Split('{')[0]
+
+          foreach ($assetPath in (Get-ChildItem -LiteralPath $distDir -File)) {
+            $assetName = $assetPath.Name
+            $assetUrl = "$uploadApi`?name=$([uri]::EscapeDataString($assetName))"
+            $contentType = switch -Wildcard ($assetName) {
+              "*.tgz" { "application/gzip"; break }
+              "*.zip" { "application/zip"; break }
+              "*.json" { "application/json"; break }
+              default { "text/plain" }
+            }
+            Invoke-RestMethod -Method Post -Uri $assetUrl -Headers $headers -ContentType $contentType -InFile $assetPath.FullName | Out-Null
+            Write-Output "Uploaded asset: $assetName"
+          }

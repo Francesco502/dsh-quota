@@ -1,0 +1,4 @@
+# dsh-quota v0.1.0 - Cordis patch layer
+- insert:
+    - id: ui-quota-monitor
+      name: 'dsh-quota'

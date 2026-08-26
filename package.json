@@ -1,0 +1,62 @@
+{
+  "name": "dsh-quota",
+  "version": "0.1.0",
+  "description": "AI Quota and Token Usage Monitor for DeepSeek Harness (Codex, Cursor, Antigravity, OpenCode-Go)",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Francesco502/dsh-quota.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Francesco502/dsh-quota/issues"
+  },
+  "homepage": "https://github.com/Francesco502/dsh-quota#readme",
+  "author": "Francesco502",
+  "scripts": {
+    "build:host": "node bundle-host.mjs",
+    "build:client": "node bundle-client.mjs",
+    "build": "node bundle-host.mjs && node bundle-client.mjs",
+    "prepack": "node bundle-host.mjs && node bundle-client.mjs",
+    "validate:release": "pwsh -File .github/scripts/validate-release.ps1"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "quota",
+    "token-meter",
+    "cursor",
+    "codex",
+    "openai",
+    "antigravity",
+    "opencode-go"
+  ],
+  "files": [
+    "src",
+    "lib",
+    "cordis.patch.yml",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0"
+}

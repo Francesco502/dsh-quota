@@ -1,0 +1,11 @@
+node_modules/
+*.log
+*.bak
+.DS_Store
+Thumbs.db
+.env
+.served-client.js
+dist/
+.npm-cache/
+*.tgz
+
