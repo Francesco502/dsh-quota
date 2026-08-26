@@ -23,8 +23,8 @@ try {
     if ($pkg.version -ne $tagVersion) {
         throw "Git tag $Tag ($tagVersion) does not match package.json version ($($pkg.version))."
     }
-    if ($pkg.name -ne "@francesco502/dsh-quota") {
-        throw "package.json name must be '@francesco502/dsh-quota', got '$($pkg.name)'."
+    if ($pkg.name -ne "@francescoli/dsh-quota") {
+        throw "package.json name must be '@francescoli/dsh-quota', got '$($pkg.name)'."
     }
     if ($null -eq $pkg.publishConfig -or $pkg.publishConfig.access -ne "public") {
         throw "package.json must contain 'publishConfig.access = public' for Scoped npm publishing."

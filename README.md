@@ -1,7 +1,7 @@
-# @francesco502/dsh-quota: DSH AI 额度与用量监控插件
+# @francescoli/dsh-quota: DSH AI 额度与用量监控插件
 
 [![version](https://img.shields.io/badge/version-v0.1.0-blue.svg)](./package.json)
-[![npm](https://img.shields.io/badge/npm-@francesco502/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francesco502/dsh-quota)
+[![npm](https://img.shields.io/badge/npm-@francescoli/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francescoli/dsh-quota)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
 > 当前版本：**v0.1.0**
@@ -39,7 +39,7 @@
 ### 方式二：通过 DSH CLI (npm Scoped 模式) 安装
 
 ```bash
-dsh plugin --profile web add @francesco502/dsh-quota
+dsh plugin --profile web add @francescoli/dsh-quota
 ```
 
 ### 方式三：通过 GitHub 源码链接安装

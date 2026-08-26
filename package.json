@@ -1,5 +1,5 @@
 {
-  "name": "@francesco502/dsh-quota",
+  "name": "@francescoli/dsh-quota",
   "version": "0.1.0",
   "description": "AI Quota and Token Usage Monitor for DeepSeek Harness (Codex, Cursor, Antigravity, OpenCode-Go)",
   "type": "module",

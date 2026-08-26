@@ -1,6 +1,6 @@
-# @francesco502/dsh-quota 版本管理与发布标准规范
+# @francescoli/dsh-quota 版本管理与发布标准规范
 
-本文档定义了 **@francesco502/dsh-quota**（DeepSeek Harness AI 额度与用量监控插件）的版本号管理、分支开发模型、变更日志规范、发布前门禁及自动化发布流程。后续的所有功能迭代、修复和版本发布均须严格遵循本规范。
+本文档定义了 **@francescoli/dsh-quota**（DeepSeek Harness AI 额度与用量监控插件）的版本号管理、分支开发模型、变更日志规范、发布前门禁及自动化发布流程。后续的所有功能迭代、修复和版本发布均须严格遵循本规范。
 
 ---
 
