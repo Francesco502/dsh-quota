@@ -1,3 +1,5 @@
+export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
+
 export interface MetricWindow {
   id: string
   label: string
@@ -18,16 +20,84 @@ export interface MetricGroup {
   windows: MetricWindow[]
 }
 
+export interface QuotaBalanceInfo {
+  currency: 'CNY' | 'USD' | 'TOKEN' | 'COUNT'
+  total?: number
+  used?: number
+  remaining?: number
+  grantedBalance?: number
+  toppedUpBalance?: number
+  expireTime?: string
+}
+
+export interface QuotaSparklinePoint {
+  t: number
+  r: number
+}
+
 export interface AuthCardItem {
   id: string
   name: string
-  provider: 'cursor' | 'codex' | 'antigravity' | 'opencode_go' | string
+  provider: string
+  category: ProviderCategory
   status: 'ok' | 'warn' | 'error' | 'disabled'
   plan?: string
   account?: string
   error?: string
   groups: MetricGroup[]
+  balance?: QuotaBalanceInfo
+  burnRatePerHour?: number
+  estimatedHoursLeft?: number
+  sparkline?: QuotaSparklinePoint[]
   lastUpdated: number
+}
+
+export interface QuotaAlarm {
+  instanceId: string
+  provider: string
+  name: string
+  level: 'warn' | 'critical'
+  message: string
+  timestamp: number
+}
+
+export interface TestConnectionResult {
+  ok: boolean
+  provider: string
+  latencyMs?: number
+  account?: string
+  message: string
+  raw?: any
+}
+
+export interface QuotaHistoryPoint {
+  timestamp: number
+  instanceId: string
+  remainingPercent: number
+  usedPercent: number
+  remainingBalance?: number
+}
+
+export interface AccountConfigItem {
+  id: string
+  provider: string
+  name?: string
+  enabled?: boolean
+  apiKey?: string
+  baseUrl?: string
+  sessionToken?: string
+  autoDetectLocal?: boolean
+  oauth?: any
+  extra?: Record<string, any>
+}
+
+export interface CustomCompatibleEndpoint {
+  id: string
+  name: string
+  baseUrl: string
+  apiKey: string
+  balancePath?: string
+  enabled?: boolean
 }
 
 export interface QuotaConfig {
@@ -36,57 +106,86 @@ export interface QuotaConfig {
   providerOrder?: string[]
   showFloatingHud?: boolean
   floatingHudMetrics?: string[]
-  cursor?: {
-    enabled?: boolean
-    autoDetectLocal?: boolean
-    sessionToken?: string
-  }
-  codex?: {
-    enabled?: boolean
-    autoDetectLocal?: boolean
-    oauth?: {
-      accessToken?: string
-      refreshToken?: string
-      accountId?: string
-      expiresAt?: number
-    }
-  }
-  antigravity?: {
-    enabled?: boolean
-    autoDetectLocal?: boolean
-    oauth?: {
-      accessToken?: string
-      refreshToken?: string
-      expiresAt?: number
-      email?: string
-      name?: string
-    }
-  }
-  opencode_go?: {
-    enabled?: boolean
-    apiKey?: string
-    baseUrl?: string
-  }
   refreshIntervalMinutes?: number
+  refreshIntervalSeconds?: number
+  alarmThresholdPercent?: number
+  enableNotification?: boolean
+  accounts?: AccountConfigItem[]
+  custom_compatible?: CustomCompatibleEndpoint[]
+  deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string }
+  codex?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any }
+  antigravity?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any }
+  opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  github_copilot?: { enabled?: boolean; token?: string; autoDetectLocal?: boolean }
+  openai_billing?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  claude?: { enabled?: boolean; apiKey?: string }
+  kimi?: { enabled?: boolean; apiKey?: string }
+  glm?: { enabled?: boolean; apiKey?: string }
+  minimax?: { enabled?: boolean; apiKey?: string }
+  qwen?: { enabled?: boolean; apiKey?: string }
+  volcengine?: { enabled?: boolean; apiKey?: string }
+}
+
+export function getRefreshIntervalSeconds(config?: QuotaConfig): number {
+  if (typeof config?.refreshIntervalSeconds === 'number' && config.refreshIntervalSeconds > 0) {
+    return Math.max(5, config.refreshIntervalSeconds)
+  }
+  if (typeof config?.refreshIntervalMinutes === 'number' && config.refreshIntervalMinutes > 0) {
+    return Math.max(5, Math.round(config.refreshIntervalMinutes * 60))
+  }
+  return 60
 }
 
 export class QuotaClientApi {
-  async getCards(force = false): Promise<{ cards: AuthCardItem[]; allCards?: AuthCardItem[]; lastUpdated: number }> {
+  async getCards(force = false): Promise<{
+    cards: AuthCardItem[]
+    allCards?: AuthCardItem[]
+    alarms?: QuotaAlarm[]
+    lastUpdated: number
+  }> {
     const res = await fetch(`/api/dsh-quota/status?force=${force}`)
     if (!res.ok) throw new Error(`获取额度失败 (${res.status})`)
     return res.json()
   }
 
-  async refreshSingle(provider: string): Promise<AuthCardItem> {
-    const res = await fetch(`/api/dsh-quota/status?provider=${encodeURIComponent(provider)}&force=true`)
+  async refreshSingle(providerOrId: string): Promise<AuthCardItem> {
+    const res = await fetch(`/api/dsh-quota/status?provider=${encodeURIComponent(providerOrId)}&force=true`)
     if (!res.ok) throw new Error(`刷新服务失败 (${res.status})`)
     const data = await res.json()
     if (data.card) return data.card
     if (data.cards && Array.isArray(data.cards)) {
-      const found = data.cards.find((c: any) => c.provider === provider)
+      const found = data.cards.find((c: any) => c.id === providerOrId || c.provider === providerOrId)
       if (found) return found
     }
     return data
+  }
+
+  async testConnection(provider: string, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+    const res = await fetch('/api/dsh-quota/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, accountConfig }),
+    })
+    if (!res.ok) throw new Error(`测活请求失败 (${res.status})`)
+    return res.json()
+  }
+
+  async testAllConnections(): Promise<Record<string, TestConnectionResult>> {
+    const res = await fetch('/api/dsh-quota/test-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!res.ok) throw new Error(`一键测活失败 (${res.status})`)
+    const data = await res.json()
+    return data.results || {}
+  }
+
+  async getHistory(instanceId: string, days = 7): Promise<QuotaHistoryPoint[]> {
+    const res = await fetch(`/api/dsh-quota/history?instanceId=${encodeURIComponent(instanceId)}&days=${days}`)
+    if (!res.ok) return []
+    const data = await res.json()
+    return data.points || []
   }
 
   async getConfig(): Promise<QuotaConfig> {

@@ -1,9 +1,8 @@
-import type { IQuotaProvider, QuotaConfig, ProviderResult, MetricGroup, MetricWindow } from '../core/types.ts'
+import type { IQuotaProvider, QuotaConfig, ProviderResult, MetricGroup, MetricWindow, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
 import { formatQuotaResetText } from '../core/types.ts'
+import { getAppStoragePaths } from '../core/paths.ts'
 import { existsSync } from 'node:fs'
-import { homedir, platform } from 'node:os'
-import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
+import { createRequire } from 'node:module'
 import { fetchWithProxy } from '../core/fetch.ts'
 
 interface OAuthTokenInfo {
@@ -79,75 +78,41 @@ function decodeUnifiedOAuth(value: string): OAuthTokenInfo | null {
   } catch { return null }
 }
 
-function formatRelativeCountdown(resetIso: string | undefined, isWeekly: boolean): string {
-  if (!resetIso) return isWeekly ? '已使用部分每周额度' : '已使用部分 5 小时额度'
-  const resetDate = new Date(resetIso)
-  const diffMs = resetDate.getTime() - Date.now()
-  if (diffMs <= 0) return '额度已完全重置'
-
-  const totalMinutes = Math.ceil(diffMs / (60 * 1000))
-  const days = Math.floor(totalMinutes / (24 * 60))
-  const hours = Math.floor((totalMinutes % (24 * 60)) / 60)
-  const minutes = totalMinutes % 60
-
-  const timeStr = resetDate.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
-  const dateStr = resetDate.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
-
-  if (isWeekly) {
-    if (days > 0) {
-      return `预计 ${days} 天${hours > 0 ? ` ${hours} 小时` : ''}后重置 (${dateStr} ${timeStr})`
-    }
-    return `预计 ${hours} 小时${minutes > 0 ? ` ${minutes} 分钟` : ''}后重置 (${timeStr})`
-  }
-
-  if (hours > 0) {
-    return `预计 ${hours} 小时${minutes > 0 ? ` ${minutes} 分钟` : ''}后重置 (${timeStr})`
-  }
-  return `预计 ${minutes} 分钟后重置 (${timeStr})`
-}
-
 export class AntigravityProvider implements IQuotaProvider {
   name = 'antigravity'
+  category = 'ide' as const
 
   private databasePaths(): string[] {
-    const home = homedir()
     const paths: string[] = []
     const appNames = ['Antigravity IDE', 'Antigravity', 'Google Antigravity', 'antigravity', 'Antigravity - Insiders']
-
-    if (platform() === 'darwin') {
-      for (const name of appNames) {
-        paths.push(join(home, 'Library', 'Application Support', name, 'User', 'globalStorage', 'state.vscdb'))
-      }
-    } else if (platform() === 'win32' && process.env.APPDATA) {
-      for (const name of appNames) {
-        paths.push(join(process.env.APPDATA, name, 'User', 'globalStorage', 'state.vscdb'))
-      }
-    } else {
-      for (const name of appNames) {
-        paths.push(join(home, '.config', name, 'User', 'globalStorage', 'state.vscdb'))
-      }
-      for (const base of ['/mnt/c/Users/81017/AppData/Roaming', process.env.USERPROFILE ? join(process.env.USERPROFILE, 'AppData', 'Roaming') : '']) {
-        if (!base) continue
-        for (const name of appNames) {
-          paths.push(join(base, name, 'User', 'globalStorage', 'state.vscdb'))
-        }
-      }
+    for (const name of appNames) {
+      paths.push(...getAppStoragePaths(name, 'User/globalStorage/state.vscdb'))
+      paths.push(...getAppStoragePaths(name, 'User\\globalStorage\\state.vscdb'))
     }
     return [...new Set(paths)]
   }
 
-  private loadToken(config: QuotaConfig): OAuthTokenInfo | null {
-    if (config.antigravity?.oauth?.accessToken || config.antigravity?.oauth?.refreshToken) {
+  private loadToken(config: QuotaConfig, accountConfig?: AccountConfigItem): OAuthTokenInfo | null {
+    const customOauth = accountConfig?.oauth || config.antigravity?.oauth
+    if (customOauth?.accessToken || customOauth?.refreshToken) {
       return {
-        accessToken: config.antigravity.oauth.accessToken,
-        refreshToken: config.antigravity.oauth.refreshToken,
-        expiry: config.antigravity.oauth.expiresAt ? Math.floor(config.antigravity.oauth.expiresAt / 1000) : undefined,
-        email: config.antigravity.oauth.email,
-        name: config.antigravity.oauth.name,
+        accessToken: customOauth.accessToken,
+        refreshToken: customOauth.refreshToken,
+        expiry: customOauth.expiresAt ? Math.floor(customOauth.expiresAt / 1000) : undefined,
+        email: customOauth.email,
+        name: customOauth.name,
       }
     }
 
-    if (config.antigravity?.autoDetectLocal !== false) {
+    if (config.antigravity?.autoDetectLocal !== false && accountConfig?.autoDetectLocal !== false) {
+      let DatabaseSync: any
+      try {
+        const requireFromHere = createRequire(import.meta.url)
+        DatabaseSync = requireFromHere('node:sqlite')?.DatabaseSync
+      } catch {}
+
+      if (!DatabaseSync) return null
+
       for (const path of this.databasePaths()) {
         if (!existsSync(path)) continue
         try {
@@ -212,14 +177,68 @@ export class AntigravityProvider implements IQuotaProvider {
     return newAccessToken
   }
 
-  async fetchCard(config: QuotaConfig): Promise<ProviderResult> {
-    const tokenInfo = this.loadToken(config)
+  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+    const start = Date.now()
+    const tokenInfo = this.loadToken(config, accountConfig)
+    if (!tokenInfo) {
+      return {
+        ok: false,
+        provider: 'antigravity',
+        message: '未找到 Antigravity 登录态。请点击登录 Google 或启动 Antigravity IDE 登录',
+      }
+    }
+
+    try {
+      const accessToken = await this.activeToken(tokenInfo, config)
+      const res = await fetchWithProxy('https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'antigravity',
+        },
+        body: '{}',
+      }, config.httpProxy, 10000)
+
+      const latencyMs = Date.now() - start
+      if (res.ok || res.status === 200) {
+        return {
+          ok: true,
+          provider: 'antigravity',
+          latencyMs,
+          account: tokenInfo.email || 'Google Account',
+          message: `连接成功 (延迟: ${latencyMs}ms)`,
+        }
+      }
+
+      return {
+        ok: false,
+        provider: 'antigravity',
+        latencyMs,
+        message: `接口响应异常: HTTP ${res.status}`,
+      }
+    } catch (err: any) {
+      return {
+        ok: false,
+        provider: 'antigravity',
+        latencyMs: Date.now() - start,
+        message: `连接失败: ${err.message}`,
+      }
+    }
+  }
+
+  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
+    const cardId = accountConfig?.id || 'antigravity'
+    const cardName = accountConfig?.name || 'Google Antigravity'
+    const tokenInfo = this.loadToken(config, accountConfig)
+
     if (!tokenInfo) {
       return {
         card: {
-          id: 'antigravity',
-          name: 'Google Antigravity',
+          id: cardId,
+          name: cardName,
           provider: 'antigravity',
+          category: this.category,
           status: 'disabled',
           error: '未连接 Antigravity。请点击「登录 Google」完成网页授权，或启动 Antigravity IDE 登录',
           groups: [],
@@ -294,7 +313,7 @@ export class AntigravityProvider implements IQuotaProvider {
 
             windows.push({
               id: b.bucketId || b.displayName,
-              label: isWeekly ? 'Weekly Limit (周配额)' : '5-Hour Limit (5小时滚动配额)',
+              label: isWeekly ? 'Weekly Limit' : '5-Hour Limit',
               subtitle,
               usedPercent: 100 - rem,
               remainingPercent: rem,
@@ -348,7 +367,7 @@ export class AntigravityProvider implements IQuotaProvider {
             const rem = Math.max(0, Math.min(100, Math.round(quota.remainingFraction * 100)))
             const isWeekly = id.toLowerCase().includes('weekly') || (model.displayName && model.displayName.toLowerCase().includes('weekly'))
             const is5Hour = id.toLowerCase().includes('five') || id.toLowerCase().includes('5hour') || (model.displayName && model.displayName.toLowerCase().includes('five'))
-            const cleanLabel = isWeekly ? 'Weekly Limit (周配额)' : is5Hour ? '5-Hour Limit (5小时滚动配额)' : (model.displayName || id)
+            const cleanLabel = isWeekly ? 'Weekly Limit' : is5Hour ? '5-Hour Limit' : (model.displayName || id)
             const subtitle = formatQuotaResetText(quota.resetTime, 100 - rem, Boolean(isWeekly))
             const item: MetricWindow = {
               id,
@@ -377,9 +396,10 @@ export class AntigravityProvider implements IQuotaProvider {
 
       return {
         card: {
-          id: 'antigravity',
-          name: 'Google Antigravity',
+          id: cardId,
+          name: cardName,
           provider: 'antigravity',
+          category: this.category,
           status: 'ok',
           plan: 'Antigravity Pro',
           account: accountEmail,
@@ -390,9 +410,10 @@ export class AntigravityProvider implements IQuotaProvider {
     } catch (err: any) {
       return {
         card: {
-          id: 'antigravity',
-          name: 'Google Antigravity',
+          id: cardId,
+          name: cardName,
           provider: 'antigravity',
+          category: this.category,
           status: 'error',
           plan: '已连接',
           account: tokenInfo.email || config.antigravity?.oauth?.email,

@@ -1,9 +1,11 @@
 /**
  * Data structures for Quota tracking & Single Long Card UI
- * @version 0.1.0
+ * @version 0.2.2
  */
 
-export const PLUGIN_VERSION = '0.1.0'
+export const PLUGIN_VERSION = '0.2.2'
+
+export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
 
 export interface MetricWindow {
   id: string
@@ -12,7 +14,7 @@ export interface MetricWindow {
   usedPercent: number
   remainingPercent: number
   resetAt?: string
-  barType?: 'circle' | 'line' // 'circle' for Antigravity, 'line' for Cursor/OpenCode
+  barType?: 'circle' | 'line'
 }
 
 export interface MetricGroup {
@@ -21,29 +23,105 @@ export interface MetricGroup {
   windows: MetricWindow[]
 }
 
+export interface QuotaBalanceInfo {
+  currency: 'CNY' | 'USD' | 'TOKEN' | 'COUNT'
+  total?: number
+  used?: number
+  remaining?: number
+  grantedBalance?: number    // 赠送金/赠送额度
+  toppedUpBalance?: number   // 充值金额
+  expireTime?: string
+}
+
+export interface QuotaSparklinePoint {
+  t: number // timestamp
+  r: number // remaining percent (0-100)
+}
+
 export interface AuthCardItem {
-  id: string
+  id: string                 // Unique card / instance ID (e.g. deepseek_default, cursor_local)
   name: string
-  provider: 'cursor' | 'codex' | 'antigravity' | 'opencode_go' | string
+  provider: string           // Provider identifier: cursor, codex, antigravity, deepseek, etc.
+  category: ProviderCategory
   status: 'ok' | 'warn' | 'error' | 'disabled'
   plan?: string
   account?: string
   error?: string
   groups: MetricGroup[]
+  balance?: QuotaBalanceInfo
+  burnRatePerHour?: number   // Recent consumption rate per hour (%)
+  estimatedHoursLeft?: number // Estimated hours until exhaustion
+  sparkline?: QuotaSparklinePoint[] // Recent 7-day trend points for instant SVG rendering
   lastUpdated: number
 }
 
+export interface QuotaHistoryPoint {
+  timestamp: number
+  instanceId: string
+  remainingPercent: number
+  usedPercent: number
+  remainingBalance?: number
+}
+
+export interface QuotaAlarm {
+  instanceId: string
+  provider: string
+  name: string
+  level: 'warn' | 'critical'
+  message: string
+  timestamp: number
+}
+
+export interface TestConnectionResult {
+  ok: boolean
+  provider: string
+  latencyMs?: number
+  account?: string
+  message: string
+  raw?: any
+}
+
+export interface AccountConfigItem {
+  id: string
+  provider: string
+  name?: string
+  enabled?: boolean
+  apiKey?: string
+  baseUrl?: string
+  sessionToken?: string
+  autoDetectLocal?: boolean
+  oauth?: any
+  extra?: Record<string, any>
+}
+
+export interface CustomCompatibleEndpoint {
+  id: string
+  name: string
+  baseUrl: string
+  apiKey: string
+  balancePath?: string
+  enabled?: boolean
+}
+
 export interface QuotaConfig {
-  httpProxy?: string // Optional proxy URL e.g. http://127.0.0.1:7890 or http://172.30.64.1:7890
-  enabledProviders?: string[] // e.g. ['antigravity', 'cursor', 'codex', 'opencode_go']
-  providerOrder?: string[]   // custom sorting order
-  showFloatingHud?: boolean  // whether to display floating circular HUD (default true)
-  floatingHudMetrics?: string[] // selected provider/window ids shown in the HUD
-  cursor?: {
-    enabled?: boolean
-    autoDetectLocal?: boolean
-    sessionToken?: string
-  }
+  httpProxy?: string
+  enabledProviders?: string[]
+  providerOrder?: string[]
+  showFloatingHud?: boolean
+  floatingHudMetrics?: string[]
+  refreshIntervalMinutes?: number
+  refreshIntervalSeconds?: number
+  alarmThresholdPercent?: number // Default 15 (%)
+  enableNotification?: boolean   // Default true
+  
+  // Multi-account store
+  accounts?: AccountConfigItem[]
+  // Custom OneAPI / NewAPI / OpenAI compatible endpoints
+  custom_compatible?: CustomCompatibleEndpoint[]
+
+  // Legacy/Default Provider Single-Account Configs (Backward compatibility)
+  deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string }
   codex?: {
     enabled?: boolean
     autoDetectLocal?: boolean
@@ -65,12 +143,25 @@ export interface QuotaConfig {
       name?: string
     }
   }
-  opencode_go?: {
-    enabled?: boolean
-    apiKey?: string
-    baseUrl?: string
+  opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  github_copilot?: { enabled?: boolean; autoDetectLocal?: boolean; token?: string }
+  openai_billing?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  claude?: { enabled?: boolean; apiKey?: string; sessionKey?: string }
+  kimi?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  glm?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  minimax?: { enabled?: boolean; apiKey?: string; groupId?: string; baseUrl?: string }
+  qwen?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  volcengine?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+}
+
+export function getRefreshIntervalSeconds(config?: QuotaConfig): number {
+  if (typeof config?.refreshIntervalSeconds === 'number' && config.refreshIntervalSeconds > 0) {
+    return Math.max(5, config.refreshIntervalSeconds)
   }
-  refreshIntervalMinutes?: number
+  if (typeof config?.refreshIntervalMinutes === 'number' && config.refreshIntervalMinutes > 0) {
+    return Math.max(5, Math.round(config.refreshIntervalMinutes * 60))
+  }
+  return 60
 }
 
 export interface ProviderResult {
@@ -79,13 +170,25 @@ export interface ProviderResult {
 
 export interface IQuotaProvider {
   name: string
-  fetchCard(config: QuotaConfig): Promise<ProviderResult>
+  category: ProviderCategory
+  fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult>
+  testConnection?(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult>
+}
+
+export interface ModelRouteRecommendation {
+  primaryModel: string
+  primaryProvider: string
+  status: 'healthy' | 'warning' | 'exhausted'
+  reason: string
+  fallbackRoutes: Array<{
+    provider: string
+    name: string
+    reason: string
+  }>
 }
 
 /**
- * Standardized reset text formatter across all providers:
- * - 100% remaining / 0% used: "已用 0% · 额度充足"
- * - Used > 0%: "已用 X% · 预计 5天3小时后重置 (8/31 15:36)"
+ * Standardized reset text formatter across all providers
  */
 export function formatQuotaResetText(resetInput?: string | number | Date, usedPercent = 0, isWeekly = false): string {
   if (usedPercent <= 0) return '已用 0% · 额度充足'

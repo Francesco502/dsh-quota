@@ -59,7 +59,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       width: 46px;
       height: 46px;
       border-radius: 50%;
-      background: var(--dsw-alias-bg-layer-2, #ffffff);
+      background: var(--dsw-alias-bg-layer-1, #ffffff);
       border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.14));
       box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
       display: flex;
@@ -67,11 +67,17 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       align-items: center;
       justify-content: center;
       overflow: visible;
-      transition: transform 0.15s ease, box-shadow 0.15s ease;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.2s ease;
     }
     .dsh-hud-circle:hover {
       transform: scale(1.06);
       box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    }
+    .dsh-hud-circle.docked {
+      opacity: 0.72;
+    }
+    .dsh-hud-circle.docked:hover {
+      opacity: 1;
     }
     .dsh-hud-svg {
       position: absolute;
@@ -93,25 +99,23 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     .dsh-hud-percent {
       font-size: 11px;
       font-weight: 700;
-      color: var(--dsw-alias-label-primary, #111111);
+      color: var(--dsw-alias-label-primary, #1f2328);
       letter-spacing: -0.2px;
     }
     .dsh-hud-tag {
       font-size: 8.5px;
       font-weight: 600;
-      color: var(--dsw-alias-label-secondary, #666666);
+      color: var(--dsw-alias-label-secondary, #57606a);
       margin-top: 1.5px;
       text-transform: uppercase;
     }
     .dsh-hud-popover {
       position: absolute;
-      bottom: calc(100% + 8px);
-      right: 0;
-      width: 230px;
+      width: 240px;
       background: var(--dsw-alias-bg-layer-1, #ffffff);
-      border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.14));
+      border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.15));
       border-radius: 10px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
       padding: 10px 12px;
       display: none;
       flex-direction: column;
@@ -120,13 +124,25 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       z-index: 1000;
       font-family: inherit;
     }
+    .dsh-hud-popover.pop-top {
+      bottom: calc(100% + 8px);
+    }
+    .dsh-hud-popover.pop-bottom {
+      top: calc(100% + 8px);
+    }
+    .dsh-hud-popover.pop-right {
+      right: 0;
+    }
+    .dsh-hud-popover.pop-left {
+      left: 0;
+    }
     [data-dsh-quota-hud]:hover .dsh-hud-popover {
       display: flex;
     }
     .dsh-hud-popover-title {
       font-size: 11.5px;
       font-weight: 700;
-      color: var(--dsw-alias-label-primary, #111111);
+      color: var(--dsw-alias-label-primary, #1f2328);
       border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.08));
       padding-bottom: 5px;
       display: flex;
@@ -138,18 +154,20 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       align-items: center;
       justify-content: space-between;
       font-size: 11px;
-      color: var(--dsw-alias-label-secondary, #555555);
+      color: var(--dsw-alias-label-secondary, #57606a);
+      gap: 8px;
     }
     .dsh-hud-popover-name {
       font-weight: 600;
-      color: var(--dsw-alias-label-primary, #222222);
-      max-width: 140px;
+      color: var(--dsw-alias-label-primary, #1f2328);
+      max-width: 145px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .dsh-hud-popover-val {
       font-weight: 700;
+      flex: none;
     }
   `
   document.head.appendChild(styleEl)
@@ -166,6 +184,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   let initialLeft = 0
   let initialTop = 0
   let moved = false
+  let isHovered = false
 
   function onPointerDown(e: MouseEvent | TouchEvent) {
     isDragging = true
@@ -220,7 +239,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       return
     }
 
-    // Magnetic snap to left or right edge
+    // Snap to left or right
     const currentLeft = hudEl.offsetLeft
     const currentTop = hudEl.offsetTop
     const snapLeft = currentLeft < window.innerWidth / 2 ? 14 : window.innerWidth - 60
@@ -230,14 +249,39 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     hudEl.style.left = `${pos.x}px`
     hudEl.style.top = `${pos.y}px`
     savePosition(pos)
+    render()
   }
 
   hudEl.addEventListener('mousedown', onPointerDown)
   hudEl.addEventListener('touchstart', onPointerDown, { passive: false })
 
-  // Carousel cycle index
-  let activeIndex = 0
-  let intervalTimer: any = null
+  hudEl.addEventListener('mouseenter', () => {
+    isHovered = true
+  })
+  hudEl.addEventListener('mouseleave', () => {
+    isHovered = false
+  })
+
+  // Tag helper
+  function getProviderTag(provider: string): string {
+    const map: Record<string, string> = {
+      deepseek: 'DSK',
+      antigravity: 'AGY',
+      cursor: 'CUR',
+      codex: 'CDX',
+      github_copilot: 'COP',
+      openai_billing: 'OAI',
+      claude: 'CLD',
+      kimi: 'KMI',
+      glm: 'GLM',
+      minimax: 'MMX',
+      qwen: 'QWN',
+      volcengine: 'ARK',
+      opencode_go: 'OPN',
+      custom_api: 'API',
+    }
+    return map[provider] || provider.slice(0, 3).toUpperCase()
+  }
 
   function getMetricsList(cards: AuthCardItem[], selectedMetrics?: string[]): Array<{
     key: string
@@ -256,7 +300,23 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
     for (const card of cards) {
       if (card.status !== 'ok' && card.status !== 'warn') continue
-      const tag = card.provider === 'antigravity' ? 'AGY' : card.provider === 'cursor' ? 'CUR' : card.provider === 'codex' ? 'CDX' : 'OPN'
+      const tag = getProviderTag(card.provider)
+
+      if (card.groups.length === 0 && card.balance?.total) {
+        const rem = card.balance.remaining !== undefined ? Math.round((card.balance.remaining / card.balance.total) * 100) : 100
+        const key = makeHudMetricKey(card.provider, 'Balance', card.id)
+        if (selectedMetrics === undefined || selectedMetrics.includes(key)) {
+          list.push({
+            key,
+            provider: card.provider,
+            name: `${card.name} · 账户余额`,
+            tag,
+            remainingPercent: Math.max(0, Math.min(100, rem)),
+          })
+        }
+        continue
+      }
+
       for (const group of card.groups) {
         for (const window of group.windows) {
           const key = makeHudMetricKey(card.provider, group.title, window.id)
@@ -275,6 +335,15 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     return list
   }
 
+  let activeIndex = 0
+  let intervalTimer: any = null
+
+  function getStatusColor(rem: number): string {
+    if (rem <= 15) return '#B04A46' // 🔴 茜色
+    if (rem <= 35) return '#BA8137' // 🟡 缃黄
+    return '#3F7A63' // 🟢 竹青
+  }
+
   function render() {
     const state = controller.getSnapshot()
     const isEnabled = state.config?.showFloatingHud !== false
@@ -287,6 +356,12 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
     const metrics = getMetricsList(state.cards, state.config?.floatingHudMetrics)
 
+    // Calculate smart collision position for Popover
+    const isNearTop = pos.y < 200
+    const isNearRight = pos.x > window.innerWidth / 2
+    const popoverVClass = isNearTop ? 'pop-bottom' : 'pop-top'
+    const popoverHClass = isNearRight ? 'pop-right' : 'pop-left'
+
     if (metrics.length === 0) {
       const hasMetricSelection = Array.isArray(state.config?.floatingHudMetrics)
       const emptyTitle = hasMetricSelection ? '未选择额度' : '未连接服务'
@@ -294,15 +369,15 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       hudEl.innerHTML = `
         <div class="dsh-hud-circle">
           <svg class="dsh-hud-svg" viewBox="0 0 46 46">
-            <circle cx="23" cy="23" r="18" stroke="var(--dsw-alias-border-l1, #ccc)" stroke-width="3" fill="none"/>
+            <circle cx="23" cy="23" r="18" stroke="var(--dsw-alias-border-l1, rgba(0,0,0,0.1))" stroke-width="3" fill="none"/>
           </svg>
           <div class="dsh-hud-content">
             <span class="dsh-hud-percent">--</span>
             <span class="dsh-hud-tag">AI</span>
           </div>
-          <div class="dsh-hud-popover">
+          <div class="dsh-hud-popover ${popoverVClass} ${popoverHClass}">
             <div class="dsh-hud-popover-title"><span>AI 额度监控</span><span style="font-weight: normal; font-size: 10px; opacity: 0.7;">${emptyTitle}</span></div>
-            <div style="font-size: 11px; color: #888;">${emptyHint}</div>
+            <div style="font-size: 11px; color: var(--dsw-alias-label-tertiary, #888);">${emptyHint}</div>
           </div>
         </div>
       `
@@ -315,21 +390,14 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     const radius = 18
     const circumference = 2 * Math.PI * radius
     const offset = circumference - (current.remainingPercent / 100) * circumference
-
-    const getStatusColor = (rem: number): string => {
-      if (rem <= 15) return '#B04A46' // 🔴 茜色
-      if (rem <= 35) return '#BA8137' // 🟡 缃黄
-      return '#3F7A63' // 🟢 竹青
-    }
-
     const strokeColor = getStatusColor(current.remainingPercent)
 
     const popoverRows = metrics.map(m => {
       const color = getStatusColor(m.remainingPercent)
       return `
         <div class="dsh-hud-popover-row">
-          <span class="dsh-hud-popover-name">${m.name}</span>
-          <span class="dsh-hud-popover-val" style="color: ${color}; font-weight: 600;">${m.remainingPercent}% 剩余</span>
+          <span class="dsh-hud-popover-name" title="${m.name}">${m.name}</span>
+          <span class="dsh-hud-popover-val" style="color: ${color};">${m.remainingPercent}% 剩余</span>
         </div>
       `
     }).join('')
@@ -346,7 +414,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
           <span class="dsh-hud-percent">${current.remainingPercent}%</span>
           <span class="dsh-hud-tag">${current.tag}</span>
         </div>
-        <div class="dsh-hud-popover">
+        <div class="dsh-hud-popover ${popoverVClass} ${popoverHClass}">
           <div class="dsh-hud-popover-title">
             <span>AI 额度监控</span>
             <span style="font-weight: normal; font-size: 10px; opacity: 0.7;">点击查看详情</span>
@@ -358,6 +426,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   }
 
   intervalTimer = setInterval(() => {
+    if (isHovered || isDragging) return // Pause carousel on hover or dragging
     const state = controller.getSnapshot()
     const metrics = getMetricsList(state.cards, state.config?.floatingHudMetrics)
     if (metrics.length > 1) {

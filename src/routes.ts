@@ -33,24 +33,67 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
     },
     {
       kind: 'exact',
-      path: '/api/dsh-quota/refresh-single',
+      path: '/api/dsh-quota/test-connection',
+      async handler(req: any, res: any) {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Method not allowed' }))
+          return
+        }
+        try {
+          let body = ''
+          for await (const chunk of req) body += chunk
+          const payload = JSON.parse(body || '{}')
+          const { provider, accountConfig } = payload
+          if (!provider) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, message: '缺少 provider 参数' }))
+            return
+          }
+          const testRes = await manager.testConnection(provider, accountConfig)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(testRes))
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, message: err.message }))
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-quota/test-all',
+      async handler(req: any, res: any) {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Method not allowed' }))
+          return
+        }
+        try {
+          const results = await manager.testAllConnections()
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, results }))
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: err.message }))
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-quota/history',
       async handler(req: any, res: any) {
         try {
           const url = new URL(req.url, 'http://127.0.0.1')
-          const provider = url.searchParams.get('provider')
-          if (!provider) {
+          const instanceId = url.searchParams.get('instanceId')
+          const days = parseInt(url.searchParams.get('days') || '7', 10)
+          if (!instanceId) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Missing provider parameter' }))
+            res.end(JSON.stringify({ error: 'Missing instanceId' }))
             return
           }
-          const card = await manager.refreshSingleProvider(provider)
-          if (!card) {
-            res.writeHead(404, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Provider not found' }))
-            return
-          }
+          const points = manager.historyManager.getTrendPoints(instanceId, days)
           res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, card }))
+          res.end(JSON.stringify({ ok: true, points }))
         } catch (err: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: err.message }))
@@ -73,7 +116,7 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
           return
         }
         if (req.method !== 'POST') {
-          res.writeHead(405, { 'Allow': 'GET, POST', 'Content-Type': 'application/json' })
+          res.writeHead(405, { Allow: 'GET, POST', 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'method not allowed' }))
           return
         }

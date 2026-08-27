@@ -4,7 +4,7 @@ import { mountSidebarEntry } from './sidebar-entry-core.ts'
 export const ENTRY_SELECTOR = '[data-dsh-quota-entry]'
 
 // 18x18 SVG meter glyph aligned to the shell's 16x16 grid and stroke
-const ICON = '<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 8l2.5-2.5"/><path d="M4.5 10.5a4.75 4.75 0 0 1 0-5"/></svg>'
+const ICON = '<svg viewBox=\"0 0 16 16\" width=\"18\" height=\"18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"6.25\"/><path d=\"M8 8l2.5-2.5\"/><path d=\"M4.5 10.5a4.75 4.75 0 0 1 0-5\"/></svg>'
 
 function ensureSidebarStyles(): void {
   if (document.getElementById('dsh-quota-sidebar-style')) return
@@ -29,6 +29,7 @@ function ensureSidebarStyles(): void {
       font-family: inherit;
       text-align: left;
       transition: background-color 120ms ease, color 120ms ease;
+      position: relative;
     }
     .dsh-quota-entry:hover {
       background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.06));
@@ -46,11 +47,29 @@ function ensureSidebarStyles(): void {
       width: 24px;
       height: 24px;
       flex: none;
+      position: relative;
     }
     .dsh-quota-entry-icon svg {
       display: block;
       width: 18px;
       height: 18px;
+    }
+    .dsh-quota-entry[data-alarm='true'] .dsh-quota-entry-icon::after {
+      content: '';
+      position: absolute;
+      top: 1px;
+      right: 1px;
+      width: 6.5px;
+      height: 6.5px;
+      border-radius: 50%;
+      background: #B04A46;
+      border: 1.5px solid var(--dsw-alias-bg-base, #ffffff);
+      box-shadow: 0 0 6px rgba(176, 74, 70, 0.6);
+      animation: dshQuotaPulse 2.5s infinite ease-in-out;
+    }
+    @keyframes dshQuotaPulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.15); opacity: 0.75; }
     }
     .dsh-quota-entry-label {
       overflow: hidden;
@@ -86,12 +105,20 @@ export function mountQuotaSidebarEntry(controller: QuotaController): () => void 
       entryLabel: 'dsh-quota-entry-label',
     },
     label: () => '额度监控',
-    tooltip: () => '查看 Codex, Antigravity, Cursor, OpenCode 剩余额度',
+    tooltip: () => '查看各 AI 模型与编程助手剩余额度与用量',
     onToggle: () => controller.toggle(),
     position: 'after',
     familySelectors: ['[data-dsh-taskboard-entry]', '[data-dsh-ssh-entry]', '[data-dsh-skill-entry]', '[data-dsh-quota-entry]'],
     active: {
-      subscribe: (listener) => controller.subscribe(listener),
+      subscribe: (listener) => {
+        return controller.subscribe(() => {
+          const entryEl = document.querySelector(ENTRY_SELECTOR) as HTMLElement | null
+          if (entryEl) {
+            entryEl.dataset.alarm = controller.hasAlarms() ? 'true' : 'false'
+          }
+          listener()
+        })
+      },
       isOpen: () => controller.getSnapshot().panelOpen,
     },
   })

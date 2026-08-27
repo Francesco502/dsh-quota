@@ -1,8 +1,8 @@
-import type { IQuotaProvider, QuotaConfig, ProviderResult, AuthCardItem } from '../core/types.ts'
+import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
 import { formatQuotaResetText } from '../core/types.ts'
+import { getHomeConfigPaths } from '../core/paths.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { homedir } from 'node:os'
+import { fetchWithProxy } from '../core/fetch.ts'
 import { join } from 'node:path'
 
 interface CodexAuth {
@@ -30,24 +30,29 @@ interface CodexUsage {
 
 export class CodexProvider implements IQuotaProvider {
   name = 'codex'
+  category = 'official_cloud' as const
 
   private authPaths(): string[] {
-    const home = homedir()
-    const paths = [
-      process.env.CODEX_HOME ? join(process.env.CODEX_HOME, 'auth.json') : '',
-      join(home, '.config', 'codex', 'auth.json'),
-      join(home, '.codex', 'auth.json'),
-    ].filter(Boolean)
-    for (const user of ['/mnt/c/Users/81017', process.env.USERPROFILE ?? '']) {
-      if (user) paths.push(join(user, '.codex', 'auth.json'))
+    const paths: string[] = []
+    if (process.env.CODEX_HOME) {
+      paths.push(join(process.env.CODEX_HOME, 'auth.json'))
     }
+    paths.push(...getHomeConfigPaths('codex', 'auth.json'))
     return [...new Set(paths)]
   }
 
-  private loadAuth(config: QuotaConfig): { accessToken: string; accountId?: string; source: string } | null {
+  private loadAuth(config: QuotaConfig, accountConfig?: AccountConfigItem): { accessToken: string; accountId?: string; source: string } | null {
+    if (accountConfig?.oauth?.accessToken) {
+      return {
+        accessToken: accountConfig.oauth.accessToken,
+        accountId: accountConfig.oauth.accountId,
+        source: accountConfig.name || 'Codex 账号',
+      }
+    }
+
     const localCandidates: Array<{ accessToken: string; accountId?: string; source: string; modifiedAt: number }> = []
 
-    if (config.codex?.autoDetectLocal !== false) {
+    if (config.codex?.autoDetectLocal !== false && accountConfig?.autoDetectLocal !== false) {
       for (const path of this.authPaths()) {
         if (!existsSync(path)) continue
         try {
@@ -66,7 +71,7 @@ export class CodexProvider implements IQuotaProvider {
 
     if (localCandidates.length > 0) {
       localCandidates.sort((a, b) => b.modifiedAt - a.modifiedAt)
-      const { modifiedAt: _modifiedAt, ...auth } = localCandidates[0]
+      const { modifiedAt: _modifiedAt, ...auth } = localCandidates[0]!
       return auth
     }
 
@@ -74,34 +79,76 @@ export class CodexProvider implements IQuotaProvider {
       return {
         accessToken: config.codex.oauth.accessToken,
         accountId: config.codex.oauth.accountId,
-        source: '旧版 DSH OAuth 登录',
+        source: 'Codex OAuth 凭据',
       }
     }
 
     return null
   }
 
-  private async fetchCodexUsage(url: string, headers: any, proxyUrl?: string): Promise<Response> {
-    const proxy = proxyUrl || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy
-    if (!proxy) return fetch(url, { headers })
+  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+    const start = Date.now()
+    const creds = this.loadAuth(config, accountConfig)
+    if (!creds) {
+      return {
+        ok: false,
+        provider: 'codex',
+        message: '未找到 Codex 凭据。请点击「登录 OpenAI」或配置 access_token',
+      }
+    }
 
-    const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-    const requireFromProfile = createRequire(join(dshHome, 'profiles', 'web', 'package.json'))
-    const { ProxyAgent } = requireFromProfile('undici')
-    const dispatcher = new ProxyAgent(proxy)
-    return fetch(url, { headers, dispatcher } as any)
+    try {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${creds.accessToken}`,
+        Accept: 'application/json',
+        'User-Agent': 'codex-cli',
+      }
+      if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
+
+      const res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000)
+      const latencyMs = Date.now() - start
+
+      if (res.ok) {
+        const data = await res.json() as any
+        return {
+          ok: true,
+          provider: 'codex',
+          latencyMs,
+          account: data.email || 'ChatGPT Account',
+          message: `连接成功 (延迟: ${latencyMs}ms)`,
+        }
+      }
+
+      return {
+        ok: false,
+        provider: 'codex',
+        latencyMs,
+        message: `接口响应异常: HTTP ${res.status}`,
+      }
+    } catch (err: any) {
+      return {
+        ok: false,
+        provider: 'codex',
+        latencyMs: Date.now() - start,
+        message: `请求异常: ${err.message}`,
+      }
+    }
   }
 
-  async fetchCard(config: QuotaConfig): Promise<ProviderResult> {
-    const creds = this.loadAuth(config)
+  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
+    const cardId = accountConfig?.id || 'codex'
+    const cardName = accountConfig?.name || 'Codex (OpenAI)'
+    const creds = this.loadAuth(config, accountConfig)
+
     if (!creds) {
       return {
         card: {
-          id: 'codex',
-          name: 'Codex (OpenAI)',
+          id: cardId,
+          name: cardName,
           provider: 'codex',
+          category: this.category,
           status: 'disabled',
-          error: '未连接 Codex。请点击「登录 Codex」通过网页登录，或在「设置」中配置代理/Token',
+          error: '未连接 Codex。请点击「登录 OpenAI」通过网页登录，或在「设置」中配置代理/Token',
           groups: [],
           lastUpdated: Date.now(),
         },
@@ -115,7 +162,8 @@ export class CodexProvider implements IQuotaProvider {
         'User-Agent': 'codex-cli',
       }
       if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
-      const res = await this.fetchCodexUsage('https://chatgpt.com/backend-api/wham/usage', headers, config.httpProxy)
+
+      const res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000)
       if (!res.ok) {
         const cloudflare = res.status === 403 && (res.headers.get('content-type') ?? '').includes('text/html')
         throw new Error(cloudflare
@@ -126,7 +174,6 @@ export class CodexProvider implements IQuotaProvider {
       const data = await res.json() as CodexUsage
       const plan = (data.plan_type ?? 'Codex').toUpperCase()
 
-      // OpenAI Codex rate_limit: primary_window is 604800s (Weekly) or secondary_window
       const rateLimit = data.rate_limit || {}
       const window = rateLimit.secondary_window || rateLimit.primary_window
       const usedPercent = Math.max(0, Math.min(100, Math.round(window?.used_percent ?? 0)))
@@ -135,9 +182,10 @@ export class CodexProvider implements IQuotaProvider {
 
       return {
         card: {
-          id: 'codex',
-          name: 'Codex (OpenAI)',
+          id: cardId,
+          name: cardName,
           provider: 'codex',
+          category: this.category,
           status: remainingPercent <= 10 ? 'warn' : 'ok',
           plan,
           account: data.email || creds.source,
@@ -148,7 +196,7 @@ export class CodexProvider implements IQuotaProvider {
               windows: [
                 {
                   id: 'codex-weekly',
-                  label: 'Weekly Limit (周配额)',
+                  label: 'Weekly Limit',
                   subtitle: formatQuotaResetText(resetAt, usedPercent, true),
                   usedPercent,
                   remainingPercent,
@@ -164,9 +212,10 @@ export class CodexProvider implements IQuotaProvider {
     } catch (err: any) {
       return {
         card: {
-          id: 'codex',
-          name: 'Codex (OpenAI)',
+          id: cardId,
+          name: cardName,
           provider: 'codex',
+          category: this.category,
           status: 'error',
           plan: '已连接',
           account: creds.source,

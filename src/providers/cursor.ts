@@ -1,9 +1,8 @@
-import type { IQuotaProvider, QuotaConfig, ProviderResult, AuthCardItem } from '../core/types.ts'
+import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
 import { formatQuotaResetText } from '../core/types.ts'
+import { getAppStoragePaths } from '../core/paths.ts'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { homedir, platform } from 'node:os'
-import { DatabaseSync } from 'node:sqlite'
+import { createRequire } from 'node:module'
 
 interface CursorLogin {
   accessToken: string
@@ -14,26 +13,31 @@ interface CursorLogin {
 
 export class CursorProvider implements IQuotaProvider {
   name = 'cursor'
+  category = 'ide' as const
 
   private databasePaths(): string[] {
-    const home = homedir()
     const paths: string[] = []
-    if (platform() === 'win32' && process.env.APPDATA) {
-      paths.push(join(process.env.APPDATA, 'Cursor', 'User', 'globalStorage', 'state.vscdb'))
-    } else if (platform() === 'darwin') {
-      paths.push(join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb'))
-    } else {
-      paths.push(join(home, '.config', 'Cursor', 'User', 'globalStorage', 'state.vscdb'))
-      paths.push('/mnt/c/Users/81017/AppData/Roaming/Cursor/User/globalStorage/state.vscdb')
-      if (process.env.USERPROFILE) paths.push(join(process.env.USERPROFILE, 'AppData', 'Roaming', 'Cursor', 'User', 'globalStorage', 'state.vscdb'))
+    for (const name of ['Cursor', 'cursor', 'Cursor - Insiders']) {
+      paths.push(...getAppStoragePaths(name, 'User/globalStorage/state.vscdb'))
+      paths.push(...getAppStoragePaths(name, 'User\\globalStorage\\state.vscdb'))
     }
     return [...new Set(paths)]
   }
 
   private findLocalLogin(): CursorLogin | null {
+    let DatabaseSync: any
+    try {
+      const requireFromHere = createRequire(import.meta.url)
+      DatabaseSync = requireFromHere('node:sqlite')?.DatabaseSync
+    } catch {}
+
     for (const path of this.databasePaths()) {
       if (!existsSync(path)) continue
       try {
+        if (!DatabaseSync) {
+          // If SQLite native binding isn't available, skip local sqlite read gracefully
+          break
+        }
         const db = new DatabaseSync(path, { readOnly: true })
         const rows = db.prepare("SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%'").all() as Array<{ key: string; value: string }>
         db.close()
@@ -53,29 +57,81 @@ export class CursorProvider implements IQuotaProvider {
     return null
   }
 
-  async fetchCard(config: QuotaConfig): Promise<ProviderResult> {
-    let cookie = ''
-    let email: string | undefined
-    let membershipType: string | undefined
-
-    if (config.cursor?.sessionToken?.trim()) {
-      const tokenInput = config.cursor.sessionToken.trim()
-      cookie = tokenInput.startsWith('WorkosCursorSessionToken=') ? tokenInput : `WorkosCursorSessionToken=${tokenInput}`
-    } else {
-      const login = this.findLocalLogin()
-      if (login) {
-        cookie = `WorkosCursorSessionToken=${login.userId}::${login.accessToken}`
-        email = login.email
-        membershipType = login.membershipType
+  private resolveCookie(config: QuotaConfig, accountConfig?: AccountConfigItem): { cookie: string; email?: string; membershipType?: string } {
+    const tokenInput = (accountConfig?.sessionToken || config.cursor?.sessionToken)?.trim()
+    if (tokenInput) {
+      return {
+        cookie: tokenInput.startsWith('WorkosCursorSessionToken=') ? tokenInput : `WorkosCursorSessionToken=${tokenInput}`,
       }
     }
+
+    if (config.cursor?.autoDetectLocal !== false && accountConfig?.autoDetectLocal !== false) {
+      const login = this.findLocalLogin()
+      if (login) {
+        return {
+          cookie: `WorkosCursorSessionToken=${login.userId}::${login.accessToken}`,
+          email: login.email,
+          membershipType: login.membershipType,
+        }
+      }
+    }
+
+    return { cookie: '' }
+  }
+
+  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+    const start = Date.now()
+    const { cookie, email } = this.resolveCookie(config, accountConfig)
+    if (!cookie) {
+      return {
+        ok: false,
+        provider: 'cursor',
+        message: '未找到 Cursor 凭据。请在设置中配置 WorkosCursorSessionToken，或确保本地 Cursor 已登录',
+      }
+    }
+
+    try {
+      const headers = { Cookie: cookie, Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' }
+      const res = await fetch('https://cursor.com/api/usage-summary', { headers })
+      const latencyMs = Date.now() - start
+      if (!res.ok) {
+        return {
+          ok: false,
+          provider: 'cursor',
+          latencyMs,
+          message: `连接失败: 接口返回 HTTP ${res.status}`,
+        }
+      }
+      const data = await res.json() as any
+      return {
+        ok: true,
+        provider: 'cursor',
+        latencyMs,
+        account: email || data.membershipType || 'Cursor 已连接',
+        message: `连接成功 (延迟: ${latencyMs}ms)`,
+      }
+    } catch (err: any) {
+      return {
+        ok: false,
+        provider: 'cursor',
+        latencyMs: Date.now() - start,
+        message: `请求异常: ${err.message}`,
+      }
+    }
+  }
+
+  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
+    const cardId = accountConfig?.id || 'cursor'
+    const cardName = accountConfig?.name || 'Cursor'
+    const { cookie, email, membershipType } = this.resolveCookie(config, accountConfig)
 
     if (!cookie) {
       return {
         card: {
-          id: 'cursor',
-          name: 'Cursor',
+          id: cardId,
+          name: cardName,
           provider: 'cursor',
+          category: this.category,
           status: 'disabled',
           error: '未连接 Cursor。请点击「连接 Cursor」自动读取本地登录，或在设置中手动填入 Session',
           groups: [],
@@ -90,15 +146,13 @@ export class CursorProvider implements IQuotaProvider {
         fetch('https://cursor.com/api/usage-summary', { headers }),
         fetch('https://cursor.com/api/auth/stripe', { headers }),
       ])
+
       if (!usageRes.ok) throw new Error(`Cursor 登录态失效或接口错误 (${usageRes.status})`)
       const data = await usageRes.json() as any
       const stripe = stripeRes.ok ? await stripeRes.json() as any : {}
       const plan = data.individualUsage?.plan
       if (!plan?.enabled) throw new Error('Cursor 当前账户未返回可用订阅额度')
 
-      // Exact values matching Cursor's official dashboard:
-      // 1. autoPercentUsed (e.g. 49% used -> "Cursor Models · Includes Cursor Grok and Composer")
-      // 2. apiPercentUsed / totalPercentUsed (e.g. 65% used -> "Other Models")
       const autoPercent = Math.max(0, Math.min(100, Math.round(plan.autoPercentUsed ?? plan.totalPercentUsed ?? 0)))
       const apiPercent = Math.max(0, Math.min(100, Math.round(plan.apiPercentUsed ?? 0)))
       const autoRemaining = Math.max(0, 100 - autoPercent)
@@ -124,9 +178,10 @@ export class CursorProvider implements IQuotaProvider {
 
       return {
         card: {
-          id: 'cursor',
-          name: 'Cursor',
+          id: cardId,
+          name: cardName,
           provider: 'cursor',
+          category: this.category,
           status: autoRemaining <= 15 ? 'warn' : 'ok',
           plan: (stripe.membershipType ?? data.membershipType ?? membershipType ?? 'Cursor').toUpperCase(),
           account: email || stripe.paymentId,
@@ -140,6 +195,7 @@ export class CursorProvider implements IQuotaProvider {
                   subtitle: autoSubtitle,
                   usedPercent: autoPercent,
                   remainingPercent: autoRemaining,
+                  resetAt: resetTimestamp ? new Date(resetTimestamp).toISOString() : undefined,
                   barType: 'circle',
                 },
                 {
@@ -159,9 +215,10 @@ export class CursorProvider implements IQuotaProvider {
     } catch (err: any) {
       return {
         card: {
-          id: 'cursor',
-          name: 'Cursor',
+          id: cardId,
+          name: cardName,
           provider: 'cursor',
+          category: this.category,
           status: 'error',
           plan: '已连接',
           account: email,

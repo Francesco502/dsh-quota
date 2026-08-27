@@ -1,7 +1,7 @@
 /**
  * Client entry for dsh-quota Web UI.
  * @package dsh-quota
- * @version 0.1.0
+ * @version 0.2.2
  */
 import { QuotaClientApi } from './api.ts'
 import { QuotaController } from './controller.ts'
@@ -9,7 +9,7 @@ import { mountQuotaSidebarEntry } from './sidebar-entry.ts'
 import { mountPanel } from './mount.ts'
 import { mountQuotaHud } from './hud.ts'
 
-export const VERSION = '0.1.0'
+export const VERSION = '0.2.2'
 export const inject = ['slots', 'sessions', 'workspaces']
 
 let applied = false
@@ -26,8 +26,8 @@ export function apply(ctx: any): void {
     const d2 = mountPanel(controller)
     const d3 = mountQuotaHud(controller)
 
-    // Auto-fetch quota on load
-    void controller.refresh()
+    // Initialize controller (load config, initial fetch, start background polling & focus listeners)
+    void controller.init()
 
     if (ctx && typeof ctx.effect === 'function') {
       ctx.effect(() => {
@@ -35,6 +35,7 @@ export function apply(ctx: any): void {
           d1()
           d2()
           d3()
+          controller.destroy()
           applied = false
         }
       }, 'quota: client cleanup')

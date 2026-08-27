@@ -1,17 +1,71 @@
-import type { IQuotaProvider, QuotaConfig, ProviderResult, AuthCardItem } from '../core/types.ts'
+import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
 import { formatQuotaResetText } from '../core/types.ts'
 import { fetchWithProxy } from '../core/fetch.ts'
 
 export class OpenCodeGoProvider implements IQuotaProvider {
   name = 'opencode_go'
+  category = 'official_cloud' as const
 
-  async fetchCard(config: QuotaConfig): Promise<ProviderResult> {
-    if (config.opencode_go?.enabled === false) {
+  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+    const start = Date.now()
+    const apiKey = (accountConfig?.apiKey || config.opencode_go?.apiKey)?.trim()
+    const baseUrl = (accountConfig?.baseUrl || config.opencode_go?.baseUrl?.trim() || 'https://opencode.ai').replace(/\/+$/, '')
+
+    if (!apiKey) {
+      return {
+        ok: false,
+        provider: 'opencode_go',
+        message: '未配置 API Key。请在「设置」中填入 OpenCode Go Key',
+      }
+    }
+
+    try {
+      const url = `${baseUrl}/zen/go/v1/usage`
+      const res = await fetchWithProxy(url, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+          'User-Agent': 'Mozilla/5.0',
+        },
+      }, config.httpProxy, 10000)
+
+      const latencyMs = Date.now() - start
+      if (res.ok) {
+        return {
+          ok: true,
+          provider: 'opencode_go',
+          latencyMs,
+          message: `连接成功 (延迟: ${latencyMs}ms)`,
+        }
+      }
+
+      return {
+        ok: false,
+        provider: 'opencode_go',
+        latencyMs,
+        message: `API 响应异常: HTTP ${res.status}`,
+      }
+    } catch (err: any) {
+      return {
+        ok: false,
+        provider: 'opencode_go',
+        latencyMs: Date.now() - start,
+        message: `连接失败: ${err.message}`,
+      }
+    }
+  }
+
+  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
+    const cardId = accountConfig?.id || 'opencode_go'
+    const cardName = accountConfig?.name || 'OpenCode Go'
+
+    if (config.opencode_go?.enabled === false && accountConfig?.enabled === false) {
       return {
         card: {
-          id: 'opencode_go',
-          name: 'OpenCode Go',
+          id: cardId,
+          name: cardName,
           provider: 'opencode_go',
+          category: this.category,
           status: 'disabled',
           groups: [],
           lastUpdated: Date.now(),
@@ -19,15 +73,16 @@ export class OpenCodeGoProvider implements IQuotaProvider {
       }
     }
 
-    const apiKey = config.opencode_go?.apiKey?.trim()
-    const baseUrl = (config.opencode_go?.baseUrl?.trim() || 'https://opencode.ai').replace(/\/+$/, '')
+    const apiKey = (accountConfig?.apiKey || config.opencode_go?.apiKey)?.trim()
+    const baseUrl = (accountConfig?.baseUrl || config.opencode_go?.baseUrl?.trim() || 'https://opencode.ai').replace(/\/+$/, '')
 
     if (!apiKey) {
       return {
         card: {
-          id: 'opencode_go',
-          name: 'OpenCode Go',
+          id: cardId,
+          name: cardName,
           provider: 'opencode_go',
+          category: this.category,
           status: 'disabled',
           error: '未配置 API Key。请在「设置」中填入 OpenCode Go Key',
           groups: [],
@@ -37,12 +92,11 @@ export class OpenCodeGoProvider implements IQuotaProvider {
     }
 
     try {
-      // Official OpenCode Go usage API endpoint
       const url = `${baseUrl}/zen/go/v1/usage`
       const res = await fetchWithProxy(url, {
         headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Accept': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
           'User-Agent': 'Mozilla/5.0',
         },
       }, config.httpProxy)
@@ -62,7 +116,7 @@ export class OpenCodeGoProvider implements IQuotaProvider {
         const resetAt = usage.rolling.resetsAt
         windows.push({
           id: 'opencode-rolling',
-          label: '5-Hour Rolling Limit (5小时额度)',
+          label: '5-Hour Rolling Limit',
           subtitle: formatQuotaResetText(resetAt, used, false),
           usedPercent: used,
           remainingPercent: rem,
@@ -77,7 +131,7 @@ export class OpenCodeGoProvider implements IQuotaProvider {
         const resetAt = usage.weekly.resetsAt
         windows.push({
           id: 'opencode-weekly',
-          label: 'Weekly Limit (周配额)',
+          label: 'Weekly Limit',
           subtitle: formatQuotaResetText(resetAt, used, true),
           usedPercent: used,
           remainingPercent: rem,
@@ -92,7 +146,7 @@ export class OpenCodeGoProvider implements IQuotaProvider {
         const resetAt = usage.monthly.resetsAt
         windows.push({
           id: 'opencode-monthly',
-          label: 'Monthly Limit (月配额)',
+          label: 'Monthly Limit',
           subtitle: formatQuotaResetText(resetAt, used, true),
           usedPercent: used,
           remainingPercent: rem,
@@ -103,9 +157,10 @@ export class OpenCodeGoProvider implements IQuotaProvider {
 
       return {
         card: {
-          id: 'opencode_go',
-          name: 'OpenCode Go',
+          id: cardId,
+          name: cardName,
           provider: 'opencode_go',
+          category: this.category,
           status: 'ok',
           plan: 'Go Plan',
           groups: [
@@ -121,9 +176,10 @@ export class OpenCodeGoProvider implements IQuotaProvider {
     } catch (err: any) {
       return {
         card: {
-          id: 'opencode_go',
-          name: 'OpenCode Go',
+          id: cardId,
+          name: cardName,
           provider: 'opencode_go',
+          category: this.category,
           status: 'error',
           error: err.message,
           groups: [],
