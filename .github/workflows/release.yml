@@ -36,24 +36,26 @@ jobs:
           & .github/scripts/validate-release.ps1 -Tag $env:GITHUB_REF_NAME
 
       - name: Prepare release assets
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist
+          rm -rf dist/*
+          
+          # 1. 生成 npm 规范分发包
+          npm pack --pack-destination dist/
+          
+          # 2. 生成编译产物压缩包
+          zip -r dist/dsh-quota-bundles.zip lib cordis.patch.yml package.json README.md LICENSE
+
+      - name: Generate Checksums & Manifest
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $distDir = Join-Path $PWD "dist"
-          if (Test-Path $distDir) { Remove-Item -Recurse -Force $distDir }
-          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
-
-          # 1. 生成 npm 规范分发包
-          npm pack
-          Get-ChildItem -Filter "*.tgz" | Move-Item -Destination $distDir -Force
-
-          # 2. 生成编译产物压缩包
-          $bundleZipPath = Join-Path $distDir "dsh-quota-bundles.zip"
-          Compress-Archive -Path "lib", "cordis.patch.yml", "package.json", "README.md", "LICENSE" -DestinationPath $bundleZipPath -Force
-
-          # 3. 计算 SHA-256 校验和并生成 release-manifest.json
           $assetList = @()
           foreach ($file in (Get-ChildItem -LiteralPath $distDir -File)) {
+              if ($file.Name.EndsWith(".sha256") -or $file.Name -eq "release-manifest.json") { continue }
               $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
               $shaFile = "$($file.FullName).sha256"
               "$hash  $($file.Name)" | Set-Content -LiteralPath $shaFile -Encoding ascii -NoNewline
