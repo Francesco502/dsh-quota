@@ -48,76 +48,45 @@ jobs:
           # 2. 生成编译产物压缩包
           zip -r dist/dsh-quota-bundles.zip lib cordis.patch.yml package.json README.md LICENSE
 
-      - name: Generate Checksums & Manifest
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $distDir = Join-Path $PWD "dist"
-          $assetList = @()
-          foreach ($file in (Get-ChildItem -LiteralPath $distDir -File)) {
-              if ($file.Name.EndsWith(".sha256") -or $file.Name -eq "release-manifest.json") { continue }
-              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-              $shaFile = "$($file.FullName).sha256"
-              "$hash  $($file.Name)" | Set-Content -LiteralPath $shaFile -Encoding ascii -NoNewline
-              $assetList += [ordered]@{
-                  name = $file.Name
-                  sha256 = $hash
-                  type = switch -Wildcard ($file.Name) {
-                      "*.tgz" { "application/gzip" }
-                      "*.zip" { "application/zip" }
-                      default { "application/octet-stream" }
-                  }
-              }
+          # 3. 计算 SHA-256 与生成清单
+          node -e '
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const crypto = require("node:crypto");
+
+          const distDir = path.join(process.cwd(), "dist");
+          const files = fs.readdirSync(distDir).filter(f => !f.endsWith(".sha256") && f !== "release-manifest.json");
+          const assets = [];
+
+          for (const f of files) {
+            const fullPath = path.join(distDir, f);
+            const content = fs.readFileSync(fullPath);
+            const hash = crypto.createHash("sha256").update(content).digest("hex");
+            fs.writeFileSync(fullPath + ".sha256", hash + "  " + f);
+            assets.push({
+              name: f,
+              sha256: hash,
+              type: f.endsWith(".tgz") ? "application/gzip" : (f.endsWith(".zip") ? "application/zip" : "application/octet-stream")
+            });
           }
 
-          $tagVersion = $env:GITHUB_REF_NAME.TrimStart("v")
-          $manifest = [ordered]@{
-              schema_version = 1
-              project = "Francesco502/dsh-quota"
-              version = $tagVersion
-              tag = $env:GITHUB_REF_NAME
-              commit = $env:GITHUB_SHA
-              generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-              assets = $assetList
-          }
-
-          $manifestPath = Join-Path $distDir "release-manifest.json"
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding utf8
-
-          Write-Output "Prepared release assets in $distDir:"
-          Get-ChildItem -LiteralPath $distDir | Select-Object Name, Length
+          const tag = process.env.GITHUB_REF_NAME || "v0.2.2";
+          const manifest = {
+            schema_version: 1,
+            project: "Francesco502/dsh-quota",
+            version: tag.replace(/^v/, ""),
+            tag: tag,
+            commit: process.env.GITHUB_SHA,
+            generated_at: new Date().toISOString(),
+            assets: assets
+          };
+          fs.writeFileSync(path.join(distDir, "release-manifest.json"), JSON.stringify(manifest, null, 2));
+          console.log("Generated manifest and checksums for:", files);
+          '
 
       - name: Publish GitHub Release
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          $repository = "Francesco502/dsh-quota"
-          $distDir = Join-Path $PWD "dist"
-          $headers = @{
-            Accept = "application/vnd.github+json"
-            Authorization = "Bearer $env:GITHUB_TOKEN"
-            "X-GitHub-Api-Version" = "2022-11-28"
-            "User-Agent" = "dsh-quota-release"
-          }
-          $releaseApi = "https://api.github.com/repos/$repository/releases"
-          $releaseBody = @{
-            tag_name = $env:GITHUB_REF_NAME
-            name = "dsh-quota $env:GITHUB_REF_NAME"
-            generate_release_notes = $true
-          } | ConvertTo-Json
-          $release = Invoke-RestMethod -Method Post -Uri $releaseApi -Headers $headers -ContentType "application/json" -Body $releaseBody
-          $uploadApi = $release.upload_url.Split('{')[0]
-
-          foreach ($assetPath in (Get-ChildItem -LiteralPath $distDir -File)) {
-            $assetName = $assetPath.Name
-            $assetUrl = "$uploadApi`?name=$([uri]::EscapeDataString($assetName))"
-            $contentType = switch -Wildcard ($assetName) {
-              "*.tgz" { "application/gzip"; break }
-              "*.zip" { "application/zip"; break }
-              "*.json" { "application/json"; break }
-              default { "text/plain" }
-            }
-            Invoke-RestMethod -Method Post -Uri $assetUrl -Headers $headers -ContentType $contentType -InFile $assetPath.FullName | Out-Null
-            Write-Output "Uploaded asset: $assetName"
-          }
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
