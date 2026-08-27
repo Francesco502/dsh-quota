@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Check out source
@@ -33,7 +33,7 @@ jobs:
       - name: Validate release metadata
         shell: pwsh
         run: |
-          & .github\scripts\validate-release.ps1 -Tag $env:GITHUB_REF_NAME
+          & .github/scripts/validate-release.ps1 -Tag $env:GITHUB_REF_NAME
 
       - name: Prepare release assets
         shell: pwsh
@@ -44,7 +44,8 @@ jobs:
           New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
           # 1. 生成 npm 规范分发包
-          npm pack --pack-destination "$distDir"
+          npm pack
+          Get-ChildItem -Filter "*.tgz" | Move-Item -Destination $distDir -Force
 
           # 2. 生成编译产物压缩包
           $bundleZipPath = Join-Path $distDir "dsh-quota-bundles.zip"
