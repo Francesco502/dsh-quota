@@ -6,7 +6,10 @@ export class QwenProvider implements IQuotaProvider {
   category = 'domestic_llm' as const
 
   private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string } {
-    const apiKey = (accountConfig?.apiKey || config.qwen?.apiKey || process.env.DASHSCOPE_API_KEY || '').trim()
+    let apiKey = ''
+    if (accountConfig && accountConfig.apiKey !== undefined) apiKey = accountConfig.apiKey
+    else if (config.qwen && config.qwen.apiKey !== undefined) apiKey = config.qwen.apiKey
+    apiKey = apiKey.trim().replace(/^Bearer\s+/i, '')
     const baseUrl = (accountConfig?.baseUrl || config.qwen?.baseUrl || 'https://dashscope.aliyuncs.com').replace(/\/+$/, '')
     return { apiKey, baseUrl }
   }

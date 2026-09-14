@@ -7,5 +7,6 @@ Thumbs.db
 .served-client.js
 dist/
 .npm-cache/
+tmp-npm-cache/
 *.tgz
 

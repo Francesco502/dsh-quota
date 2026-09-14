@@ -6,7 +6,10 @@ export class MiniMaxProvider implements IQuotaProvider {
   category = 'domestic_llm' as const
 
   private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string; groupId?: string } {
-    const apiKey = (accountConfig?.apiKey || config.minimax?.apiKey || process.env.MINIMAX_API_KEY || '').trim()
+    let apiKey = ''
+    if (accountConfig && accountConfig.apiKey !== undefined) apiKey = accountConfig.apiKey
+    else if (config.minimax && config.minimax.apiKey !== undefined) apiKey = config.minimax.apiKey
+    apiKey = apiKey.trim().replace(/^Bearer\s+/i, '')
     const baseUrl = (accountConfig?.baseUrl || config.minimax?.baseUrl || 'https://api.minimax.chat').replace(/\/+$/, '')
     const groupId = accountConfig?.extra?.groupId || config.minimax?.groupId
     return { apiKey, baseUrl, groupId }
@@ -57,7 +60,7 @@ export class MiniMaxProvider implements IQuotaProvider {
   async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'minimax'
     const cardName = accountConfig?.name || 'MiniMax (海螺)'
-    const { apiKey } = this.resolveKey(config, accountConfig)
+    const { apiKey, baseUrl } = this.resolveKey(config, accountConfig)
 
     if (!apiKey) {
       return {
@@ -75,6 +78,14 @@ export class MiniMaxProvider implements IQuotaProvider {
     }
 
     try {
+      const res = await fetchWithProxy(`${baseUrl}/v1/models`, {
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      }, config.httpProxy, 10000)
+
+      if (!res.ok) {
+        throw new Error(`MiniMax API 验证失败 (${res.status})`)
+      }
+
       return {
         card: {
           id: cardId,

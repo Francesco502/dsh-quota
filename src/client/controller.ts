@@ -8,6 +8,8 @@ export const DEFAULT_PROVIDER_ORDER = [
   'antigravity',
   'cursor',
   'codex',
+  'siliconflow',
+  'openrouter',
   'github_copilot',
   'openai_billing',
   'claude',
@@ -174,19 +176,28 @@ export class QuotaController {
     const orderList = cfg?.providerOrder && cfg.providerOrder.length > 0 ? cfg.providerOrder : DEFAULT_PROVIDER_ORDER
     const enabledSet = cfg?.enabledProviders ? new Set(cfg.enabledProviders) : null
 
-    // Filter cards to display
-    let visibleCards = this.cards
+    // Filter cards to display from allCards pool for instant reactivity
+    const pool = this.allCards.length > 0 ? this.allCards : this.cards
+    let visibleCards = pool
     if (this.activeCategory !== 'all') {
       visibleCards = visibleCards.filter(c => c.category === this.activeCategory)
     }
 
     if (enabledSet) {
-      visibleCards = visibleCards.filter(c => enabledSet.has(c.provider) || c.provider === 'custom_api')
+      visibleCards = visibleCards.filter(c => {
+        if (c.provider === 'custom_api') {
+          return enabledSet.has(c.id)
+        }
+        return enabledSet.has(c.id) || enabledSet.has(c.provider)
+      })
     }
 
+    // Do not show disabled cards (cards without configured credentials) on dashboard
+    visibleCards = visibleCards.filter(c => c.status !== 'disabled')
+
     visibleCards.sort((a, b) => {
-      const idxA = orderList.indexOf(a.provider)
-      const idxB = orderList.indexOf(b.provider)
+      const idxA = orderList.indexOf(a.id) !== -1 ? orderList.indexOf(a.id) : orderList.indexOf(a.provider)
+      const idxB = orderList.indexOf(b.id) !== -1 ? orderList.indexOf(b.id) : orderList.indexOf(b.provider)
       return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB)
     })
 

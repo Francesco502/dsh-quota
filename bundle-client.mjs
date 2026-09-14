@@ -27,20 +27,30 @@ for (const f of files) {
 
 const cleanJs = stripTypeScriptTypes(combined)
 
-const bundle = `window.__ModuleLoader__.load({
-  id: "dsh-quota",
-  factory: (require) => {
-    var module = { exports: {} };
-    var exports = module.exports;
-    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+const bundle = `const factory = (require) => {
+  var module = { exports: {} };
+  var exports = module.exports;
+  Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 
 ${cleanJs}
 
-    exports.apply = apply;
-    exports.VERSION = VERSION;
-    return module.exports;
-  }
-});`
+  exports.apply = apply;
+  exports.inject = typeof inject !== 'undefined' ? inject : [];
+  exports.VERSION = VERSION;
+  return module.exports;
+};
+
+if (typeof window !== 'undefined' && window.__ModuleLoader__) {
+  window.__ModuleLoader__.load({
+    id: "@francescoli/dsh-quota",
+    factory: factory
+  });
+  window.__ModuleLoader__.load({
+    id: "dsh-quota",
+    factory: factory
+  });
+}
+`
 
 mkdirSync(join(baseDir, 'lib'), { recursive: true })
 writeFileSync(join(baseDir, 'lib/client.js'), bundle, 'utf8')

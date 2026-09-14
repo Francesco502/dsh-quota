@@ -1,9 +1,9 @@
 /**
  * Data structures for Quota tracking & Single Long Card UI
- * @version 0.2.2
+ * @version 0.3.0
  */
 
-export const PLUGIN_VERSION = '0.2.2'
+export const PLUGIN_VERSION = '0.3.0'
 
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
 
@@ -105,8 +105,10 @@ export interface CustomCompatibleEndpoint {
 
 export interface QuotaConfig {
   httpProxy?: string
-  enabledProviders?: string[]
+  enabledProviders?: string[] // 看板展示服务列表
+  floatingHudProviders?: string[] // 悬浮球展示服务列表
   providerOrder?: string[]
+  customNames?: Record<string, string> // 用户自定义服务显示名称
   showFloatingHud?: boolean
   floatingHudMetrics?: string[]
   refreshIntervalMinutes?: number
@@ -120,11 +122,12 @@ export interface QuotaConfig {
   custom_compatible?: CustomCompatibleEndpoint[]
 
   // Legacy/Default Provider Single-Account Configs (Backward compatibility)
-  deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string }
+  deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string; name?: string }
   codex?: {
     enabled?: boolean
     autoDetectLocal?: boolean
+    name?: string
     oauth?: {
       accessToken?: string
       refreshToken?: string
@@ -135,6 +138,7 @@ export interface QuotaConfig {
   antigravity?: {
     enabled?: boolean
     autoDetectLocal?: boolean
+    name?: string
     oauth?: {
       accessToken?: string
       refreshToken?: string
@@ -143,15 +147,18 @@ export interface QuotaConfig {
       name?: string
     }
   }
-  opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  github_copilot?: { enabled?: boolean; autoDetectLocal?: boolean; token?: string }
-  openai_billing?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  claude?: { enabled?: boolean; apiKey?: string; sessionKey?: string }
-  kimi?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  glm?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  minimax?: { enabled?: boolean; apiKey?: string; groupId?: string; baseUrl?: string }
-  qwen?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  volcengine?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
+  opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  github_copilot?: { enabled?: boolean; autoDetectLocal?: boolean; token?: string; name?: string }
+  openai_billing?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  claude?: { enabled?: boolean; apiKey?: string; sessionKey?: string; baseUrl?: string; name?: string }
+  kimi?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  glm?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  minimax?: { enabled?: boolean; apiKey?: string; groupId?: string; baseUrl?: string; name?: string }
+  qwen?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  volcengine?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  siliconflow?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  openrouter?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  custom_api?: { enabled?: boolean; name?: string }
 }
 
 export function getRefreshIntervalSeconds(config?: QuotaConfig): number {
@@ -177,11 +184,14 @@ export interface IQuotaProvider {
 
 export interface ModelRouteRecommendation {
   primaryModel: string
+  primaryModelId: string
   primaryProvider: string
   status: 'healthy' | 'warning' | 'exhausted'
   reason: string
+  availableModels?: string[]
   fallbackRoutes: Array<{
     provider: string
+    modelId: string
     name: string
     reason: string
   }>

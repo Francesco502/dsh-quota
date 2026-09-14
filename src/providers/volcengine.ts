@@ -6,7 +6,10 @@ export class VolcengineProvider implements IQuotaProvider {
   category = 'domestic_llm' as const
 
   private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string } {
-    const apiKey = (accountConfig?.apiKey || config.volcengine?.apiKey || process.env.ARK_API_KEY || '').trim()
+    let apiKey = ''
+    if (accountConfig && accountConfig.apiKey !== undefined) apiKey = accountConfig.apiKey
+    else if (config.volcengine && config.volcengine.apiKey !== undefined) apiKey = config.volcengine.apiKey
+    apiKey = apiKey.trim().replace(/^Bearer\s+/i, '')
     const baseUrl = (accountConfig?.baseUrl || config.volcengine?.baseUrl || 'https://ark.cn-beijing.volces.com').replace(/\/+$/, '')
     return { apiKey, baseUrl }
   }

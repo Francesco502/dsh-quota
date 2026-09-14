@@ -1,6 +1,7 @@
 import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
 import { formatQuotaResetText } from '../core/types.ts'
 import { getAppStoragePaths } from '../core/paths.ts'
+import { fetchWithProxy } from '../core/fetch.ts'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -92,7 +93,7 @@ export class CursorProvider implements IQuotaProvider {
 
     try {
       const headers = { Cookie: cookie, Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' }
-      const res = await fetch('https://cursor.com/api/usage-summary', { headers })
+      const res = await fetchWithProxy('https://cursor.com/api/usage-summary', { headers }, config.httpProxy, 12000)
       const latencyMs = Date.now() - start
       if (!res.ok) {
         return {
@@ -143,8 +144,8 @@ export class CursorProvider implements IQuotaProvider {
     try {
       const headers = { Cookie: cookie, Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' }
       const [usageRes, stripeRes] = await Promise.all([
-        fetch('https://cursor.com/api/usage-summary', { headers }),
-        fetch('https://cursor.com/api/auth/stripe', { headers }),
+        fetchWithProxy('https://cursor.com/api/usage-summary', { headers }, config.httpProxy, 12000),
+        fetchWithProxy('https://cursor.com/api/auth/stripe', { headers }, config.httpProxy, 12000),
       ])
 
       if (!usageRes.ok) throw new Error(`Cursor 登录态失效或接口错误 (${usageRes.status})`)

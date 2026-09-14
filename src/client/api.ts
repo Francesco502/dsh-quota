@@ -103,7 +103,9 @@ export interface CustomCompatibleEndpoint {
 export interface QuotaConfig {
   httpProxy?: string
   enabledProviders?: string[]
+  floatingHudProviders?: string[]
   providerOrder?: string[]
+  customNames?: Record<string, string>
   showFloatingHud?: boolean
   floatingHudMetrics?: string[]
   refreshIntervalMinutes?: number
@@ -112,19 +114,22 @@ export interface QuotaConfig {
   enableNotification?: boolean
   accounts?: AccountConfigItem[]
   custom_compatible?: CustomCompatibleEndpoint[]
-  deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string }
-  codex?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any }
-  antigravity?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any }
-  opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  github_copilot?: { enabled?: boolean; token?: string; autoDetectLocal?: boolean }
-  openai_billing?: { enabled?: boolean; apiKey?: string; baseUrl?: string }
-  claude?: { enabled?: boolean; apiKey?: string }
-  kimi?: { enabled?: boolean; apiKey?: string }
-  glm?: { enabled?: boolean; apiKey?: string }
-  minimax?: { enabled?: boolean; apiKey?: string }
-  qwen?: { enabled?: boolean; apiKey?: string }
-  volcengine?: { enabled?: boolean; apiKey?: string }
+  deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string; name?: string }
+  codex?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string }
+  antigravity?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string }
+  opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  github_copilot?: { enabled?: boolean; token?: string; autoDetectLocal?: boolean; name?: string }
+  openai_billing?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  claude?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  kimi?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  glm?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  minimax?: { enabled?: boolean; apiKey?: string; groupId?: string; baseUrl?: string; name?: string }
+  qwen?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  volcengine?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  siliconflow?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  openrouter?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
+  custom_api?: { enabled?: boolean; name?: string }
 }
 
 export function getRefreshIntervalSeconds(config?: QuotaConfig): number {

@@ -13,6 +13,8 @@ import { GLMProvider } from '../providers/glm.ts'
 import { MiniMaxProvider } from '../providers/minimax.ts'
 import { QwenProvider } from '../providers/qwen.ts'
 import { VolcengineProvider } from '../providers/volcengine.ts'
+import { SiliconFlowProvider } from '../providers/siliconflow.ts'
+import { OpenRouterProvider } from '../providers/openrouter.ts'
 import { CustomApiProvider } from '../providers/custom-api.ts'
 import { OAuthManager } from './oauth.ts'
 import { QuotaHistoryManager } from './history.ts'
@@ -20,12 +22,15 @@ import { QuotaAlarmDetector } from './alarm.ts'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { atomicWriteJsonSync } from './paths.ts'
 
 export const DEFAULT_PROVIDER_ORDER = [
   'deepseek',
   'antigravity',
   'cursor',
   'codex',
+  'siliconflow',
+  'openrouter',
   'github_copilot',
   'openai_billing',
   'claude',
@@ -37,6 +42,122 @@ export const DEFAULT_PROVIDER_ORDER = [
   'opencode_go',
   'custom_api',
 ]
+
+export const PROVIDER_DEFAULT_MODELS: Record<string, { primaryId: string; available: string[]; role: string }> = {
+  deepseek: {
+    primaryId: 'deepseek-chat',
+    available: ['deepseek-chat', 'deepseek-reasoner'],
+    role: '长文本理解、通用代码生成与逻辑推理',
+  },
+  siliconflow: {
+    primaryId: 'deepseek-ai/DeepSeek-V3',
+    available: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen2.5-Coder-32B-Instruct'],
+    role: '国内高并发大模型推理中转',
+  },
+  openrouter: {
+    primaryId: 'anthropic/claude-3.5-sonnet',
+    available: ['anthropic/claude-3.5-sonnet', 'openai/gpt-4o', 'deepseek/deepseek-r1'],
+    role: '海外顶尖全模型智能聚合路由',
+  },
+  antigravity: {
+    primaryId: 'gemini-2.0-flash',
+    available: ['gemini-2.0-flash', 'claude-3-5-sonnet', 'gemini-2.0-pro-exp'],
+    role: '超长上下文与快速代码重构',
+  },
+  cursor: {
+    primaryId: 'claude-3.5-sonnet',
+    available: ['claude-3.5-sonnet', 'cursor-small', 'gpt-4o'],
+    role: 'IDE 本地编程补全与编辑',
+  },
+  codex: {
+    primaryId: 'gpt-4o',
+    available: ['gpt-4o', 'o1', 'o3-mini'],
+    role: '深度复杂推理与多轮问答',
+  },
+  github_copilot: {
+    primaryId: 'gpt-4o',
+    available: ['gpt-4o', 'claude-3.5-sonnet'],
+    role: '代码生成与上下文审查',
+  },
+  openai_billing: {
+    primaryId: 'gpt-4o',
+    available: ['gpt-4o', 'gpt-4o-mini', 'o3-mini'],
+    role: 'OpenAI 官方 API 全量能力',
+  },
+  claude: {
+    primaryId: 'claude-3-5-sonnet-20241022',
+    available: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
+    role: '高精度代码架构与逻辑推理',
+  },
+  kimi: {
+    primaryId: 'moonshot-v1-auto',
+    available: ['moonshot-v1-auto', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+    role: '超长中文文档研读与知识检索',
+  },
+  glm: {
+    primaryId: 'glm-4-flash',
+    available: ['glm-4-flash', 'glm-4-plus', 'glm-4-air'],
+    role: '中文高响应推理与轻量任务',
+  },
+  qwen: {
+    primaryId: 'qwen-plus',
+    available: ['qwen-plus', 'qwen-max', 'qwen-2.5-coder-32b-instruct'],
+    role: '阿里云百炼中文大模型与代码基座',
+  },
+  minimax: {
+    primaryId: 'MiniMax-Text-01',
+    available: ['MiniMax-Text-01'],
+    role: '通用中文对话与文本创作',
+  },
+  volcengine: {
+    primaryId: 'doubao-pro-32k',
+    available: ['doubao-pro-32k', 'doubao-lite-32k'],
+    role: '火山方舟豆包高性价比推理',
+  },
+  opencode_go: {
+    primaryId: 'opencode-go-default',
+    available: ['opencode-go-default'],
+    role: '算力共享与开源模型托管',
+  },
+  custom_api: {
+    primaryId: 'gpt-4o',
+    available: ['gpt-4o'],
+    role: '自定义 OneAPI / NewAPI 渠道',
+  },
+}
+
+/**
+ * Executes async tasks with bounded concurrency to prevent socket exhaustion and rate limiting.
+ */
+export async function runWithConcurrency<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  limit = 5
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length)
+  let nextIndex = 0
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const idx = nextIndex++
+      const item = items[idx]!
+      try {
+        const val = await fn(item)
+        results[idx] = { status: 'fulfilled', value: val }
+      } catch (err) {
+        results[idx] = { status: 'rejected', reason: err }
+      }
+    }
+  }
+
+  const workerCount = Math.min(Math.max(1, limit), items.length)
+  const workers: Promise<void>[] = []
+  for (let i = 0; i < workerCount; i++) {
+    workers.push(worker())
+  }
+  await Promise.all(workers)
+  return results
+}
 
 interface CacheEntry {
   card: AuthCardItem
@@ -55,8 +176,7 @@ export class QuotaManager {
 
   constructor() {
     this.registerDefaultProviders()
-    const home = homedir()
-    const dshDir = join(home, '.dsh')
+    const dshDir = process.env.DSH_HOME || join(homedir(), '.dsh')
     if (!existsSync(dshDir)) {
       try {
         mkdirSync(dshDir, { recursive: true })
@@ -80,6 +200,8 @@ export class QuotaManager {
       new MiniMaxProvider(),
       new QwenProvider(),
       new VolcengineProvider(),
+      new SiliconFlowProvider(),
+      new OpenRouterProvider(),
       new OpenCodeGoProvider(),
       new CustomApiProvider(),
     ]
@@ -165,23 +287,29 @@ export class QuotaManager {
       minimax: { ...current.minimax, ...newConfig.minimax },
       qwen: { ...current.qwen, ...newConfig.qwen },
       volcengine: { ...current.volcengine, ...newConfig.volcengine },
+      siliconflow: { ...current.siliconflow, ...newConfig.siliconflow },
+      openrouter: { ...current.openrouter, ...newConfig.openrouter },
       opencode_go: { ...current.opencode_go, ...newConfig.opencode_go },
-      custom_compatible: newConfig.custom_compatible || current.custom_compatible,
-      accounts: newConfig.accounts || current.accounts,
-    }
-
-    if (newConfig.enabledProviders) {
-      const enabled = new Set(newConfig.enabledProviders)
-      for (const p of DEFAULT_PROVIDER_ORDER) {
-        const providerConfig = (merged as any)[p] || {}
-        ;(merged as any)[p] = { ...providerConfig, enabled: enabled.has(p) }
-      }
+      custom_compatible: newConfig.custom_compatible !== undefined ? newConfig.custom_compatible : current.custom_compatible,
+      accounts: newConfig.accounts !== undefined ? newConfig.accounts : current.accounts,
+      enabledProviders: newConfig.enabledProviders !== undefined ? newConfig.enabledProviders : current.enabledProviders,
+      floatingHudProviders: newConfig.floatingHudProviders !== undefined ? newConfig.floatingHudProviders : current.floatingHudProviders,
+      floatingHudMetrics: newConfig.floatingHudMetrics !== undefined ? newConfig.floatingHudMetrics : current.floatingHudMetrics,
+      providerOrder: newConfig.providerOrder !== undefined ? newConfig.providerOrder : current.providerOrder,
+      customNames: (() => {
+        if (newConfig.customNames === undefined) return current.customNames
+        const combined = { ...(current.customNames || {}), ...newConfig.customNames }
+        for (const [k, v] of Object.entries(combined)) {
+          if (!v || !v.trim()) delete (combined as any)[k]
+        }
+        return combined
+      })(),
     }
 
     this.config = merged
     this.cardCache.clear()
     try {
-      writeFileSync(this.configPath, JSON.stringify(this.config, null, 2), { encoding: 'utf8', mode: 0o600 })
+      atomicWriteJsonSync(this.configPath, this.config, 0o600)
     } catch {}
   }
 
@@ -205,7 +333,7 @@ export class QuotaManager {
         ...(tokens.refreshToken ? { refresh_token: tokens.refreshToken } : {}),
         ...(tokens.accountId ? { account_id: tokens.accountId } : {}),
       }
-      writeFileSync(authPath, JSON.stringify(auth, null, 2), { encoding: 'utf8', mode: 0o600 })
+      atomicWriteJsonSync(authPath, auth, 0o600)
     } catch {}
   }
 
@@ -238,6 +366,7 @@ export class QuotaManager {
               name: cust.name,
               apiKey: cust.apiKey,
               baseUrl: cust.baseUrl,
+              extra: { balancePath: cust.balancePath },
             },
           })
         }
@@ -263,29 +392,8 @@ export class QuotaManager {
     return tasks
   }
 
-  private generateSparkline(instanceId: string, currentRem: number): QuotaSparklinePoint[] {
-    const trend = this.historyManager.getTrendPoints(instanceId, 7)
-    if (trend.length === 0) {
-      const now = Date.now()
-      return [
-        { t: now - 3 * 86400000, r: currentRem },
-        { t: now - 86400000, r: currentRem },
-        { t: now, r: currentRem },
-      ]
-    }
-
-    // Sample to max 12 points
-    const step = Math.max(1, Math.floor(trend.length / 12))
-    const points: QuotaSparklinePoint[] = []
-    for (let i = 0; i < trend.length; i += step) {
-      const pt = trend[i]!
-      points.push({ t: pt.timestamp, r: pt.remainingPercent })
-    }
-    const last = trend[trend.length - 1]!
-    if (!points.some(p => p.t === last.timestamp)) {
-      points.push({ t: last.timestamp, r: currentRem })
-    }
-    return points
+  private generateSparkline(instanceId: string, _currentRem: number): QuotaSparklinePoint[] {
+    return this.historyManager.getUsageTrendPoints(instanceId, 7)
   }
 
   async getQuotaCards(forceRefresh = false): Promise<{
@@ -299,7 +407,7 @@ export class QuotaManager {
     const now = Date.now()
 
     const tasks = this.buildInstanceTasks()
-    const fetchPromises = tasks.map(async ({ id, providerName, accountConfig }) => {
+    const settled = await runWithConcurrency(tasks, async ({ id, providerName, accountConfig }) => {
       const cached = this.cardCache.get(id)
       if (!forceRefresh && cached && (now - cached.fetchedAt) < ttl) {
         return cached.card
@@ -318,12 +426,18 @@ export class QuotaManager {
         card.estimatedHoursLeft = estimatedHoursLeft
         card.sparkline = this.generateSparkline(id, remPercent)
 
+        const customName = (this.config as any)[providerName]?.name || this.config.customNames?.[id] || this.config.customNames?.[providerName]
+        if (customName) {
+          card.name = customName
+        }
+
         this.cardCache.set(id, { card, fetchedAt: now })
         return card
       } catch (err: any) {
+        const customName = (this.config as any)[providerName]?.name || this.config.customNames?.[id] || this.config.customNames?.[providerName]
         const errCard: AuthCardItem = {
           id,
-          name: accountConfig?.name || provider.name,
+          name: customName || accountConfig?.name || provider.name,
           provider: providerName,
           category: provider.category,
           status: 'error',
@@ -334,9 +448,8 @@ export class QuotaManager {
         this.cardCache.set(id, { card: errCard, fetchedAt: now })
         return errCard
       }
-    })
+    }, 5)
 
-    const settled = await Promise.allSettled(fetchPromises)
     const allCards: AuthCardItem[] = []
     for (const r of settled) {
       if (r.status === 'fulfilled' && r.value) {
@@ -355,14 +468,15 @@ export class QuotaManager {
     const enabledSet = new Set(this.config.enabledProviders ?? DEFAULT_PROVIDER_ORDER)
 
     const visibleCards = allCards.filter(c => {
-      if (enabledSet.has(c.provider) && (this.config as any)[c.provider]?.enabled !== false) return true
-      if (c.provider === 'custom_api') return true
-      return false
+      if (c.status === 'disabled') return false
+      const isEnabled = enabledSet.has(c.id) || enabledSet.has(c.provider)
+      if (c.provider === 'custom_api') return isEnabled
+      return isEnabled && (this.config as any)[c.provider]?.enabled !== false
     })
 
     visibleCards.sort((a, b) => {
-      const idxA = orderList.indexOf(a.provider)
-      const idxB = orderList.indexOf(b.provider)
+      const idxA = orderList.indexOf(a.id) !== -1 ? orderList.indexOf(a.id) : orderList.indexOf(a.provider)
+      const idxB = orderList.indexOf(b.id) !== -1 ? orderList.indexOf(b.id) : orderList.indexOf(b.provider)
       return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB)
     })
 
@@ -390,6 +504,11 @@ export class QuotaManager {
       card.burnRatePerHour = burnRatePerHour
       card.estimatedHoursLeft = estimatedHoursLeft
       card.sparkline = this.generateSparkline(task.id, remPercent)
+
+      const customName = (this.config as any)[task.providerName]?.name || this.config.customNames?.[task.id] || this.config.customNames?.[task.providerName]
+      if (customName) {
+        card.name = customName
+      }
 
       this.cardCache.set(task.id, { card, fetchedAt: Date.now() })
       this.historyManager.recordSnapshots([card])
@@ -451,12 +570,12 @@ export class QuotaManager {
     }
     const results: Record<string, TestConnectionResult> = {}
 
-    const promises = tasks.map(async (t) => {
+    await runWithConcurrency(tasks, async (t) => {
       const res = await this.testConnection(t.providerName, t.accountConfig)
       results[t.id] = res
-    })
+      return res
+    }, 5)
 
-    await Promise.allSettled(promises)
     return results
   }
 
@@ -475,34 +594,48 @@ export class QuotaManager {
 
     let recommendation: ModelRouteRecommendation
     if (healthyServices.length > 0) {
-      const primary = healthyServices.find(c => c.provider === 'deepseek') || healthyServices[0]!
-      const fallbacks = healthyServices.filter(c => c.id !== primary.id).slice(0, 3).map(c => ({
-        provider: c.provider,
-        name: c.name,
-        reason: '健康在线，可用额度充足',
-      }))
+      const primary = healthyServices.find(c => c.provider === 'deepseek')
+        || healthyServices.find(c => c.provider === 'siliconflow')
+        || healthyServices[0]!
+      const meta = PROVIDER_DEFAULT_MODELS[primary.provider] || { primaryId: primary.provider, available: [primary.provider], role: '通用大模型' }
+      const fallbacks = healthyServices.filter(c => c.id !== primary.id).slice(0, 4).map(c => {
+        const fMeta = PROVIDER_DEFAULT_MODELS[c.provider] || { primaryId: c.provider, available: [c.provider], role: '备用模型' }
+        return {
+          provider: c.provider,
+          modelId: fMeta.primaryId,
+          name: `${c.name} (${fMeta.primaryId})`,
+          reason: `${fMeta.role} · 额度充足健康在线`,
+        }
+      })
       recommendation = {
-        primaryModel: primary.name,
+        primaryModel: `${primary.name} (${meta.primaryId})`,
+        primaryModelId: meta.primaryId,
         primaryProvider: primary.provider,
         status: 'healthy',
-        reason: `首选 ${primary.name}（额度正常 · 可用）`,
+        reason: `首选 ${primary.name} · 调用模型 ${meta.primaryId}（${meta.role} · 额度正常可用）`,
+        availableModels: meta.available,
         fallbackRoutes: fallbacks,
       }
     } else if (warningServices.length > 0) {
       const primary = warningServices[0]!
+      const meta = PROVIDER_DEFAULT_MODELS[primary.provider] || { primaryId: primary.provider, available: [primary.provider], role: '告警备用' }
       recommendation = {
-        primaryModel: primary.name,
+        primaryModel: `${primary.name} (${meta.primaryId})`,
+        primaryModelId: meta.primaryId,
         primaryProvider: primary.provider,
         status: 'warning',
-        reason: `首选 ${primary.name} 额度已低于警戒线，建议谨慎执行高消耗长任务`,
+        reason: `首选 ${primary.name} · 模型 ${meta.primaryId} 额度已低于警戒线，建议谨慎执行高消耗长任务`,
+        availableModels: meta.available,
         fallbackRoutes: [],
       }
     } else {
       recommendation = {
         primaryModel: 'none',
+        primaryModelId: 'none',
         primaryProvider: 'none',
         status: 'exhausted',
         reason: '当前所有已配置 AI 服务均处于未连接或异常状态，请在额度监控中配置有效凭据',
+        availableModels: [],
         fallbackRoutes: [],
       }
     }
@@ -513,28 +646,33 @@ export class QuotaManager {
       alarmCount: alarms.length,
       alarms: alarms.map(a => ({ level: a.level, name: a.name, message: a.message })),
       recommendation,
-      services: targetCards.map(c => ({
-        id: c.id,
-        name: c.name,
-        provider: c.provider,
-        category: c.category,
-        status: c.status,
-        plan: c.plan,
-        account: c.account,
-        error: c.error,
-        balance: c.balance,
-        burnRatePerHour: c.burnRatePerHour ? `${c.burnRatePerHour}%/h` : undefined,
-        estimatedHoursLeft: c.estimatedHoursLeft ? `${c.estimatedHoursLeft} 小时` : undefined,
-        quotas: c.groups.map(g => ({
-          group: g.title,
-          windows: g.windows.map(w => ({
-            label: w.label,
-            remaining: `${w.remainingPercent}%`,
-            used: `${w.usedPercent}%`,
-            subtitle: w.subtitle,
+      services: targetCards.map(c => {
+        const modelMeta = PROVIDER_DEFAULT_MODELS[c.provider]
+        return {
+          id: c.id,
+          name: c.name,
+          provider: c.provider,
+          modelId: modelMeta?.primaryId,
+          availableModels: modelMeta?.available,
+          category: c.category,
+          status: c.status,
+          plan: c.plan,
+          account: c.account,
+          error: c.error,
+          balance: c.balance,
+          burnRatePerHour: c.burnRatePerHour ? `${c.burnRatePerHour}%/h` : undefined,
+          estimatedHoursLeft: c.estimatedHoursLeft ? `${c.estimatedHoursLeft} 小时` : undefined,
+          quotas: c.groups.map(g => ({
+            group: g.title,
+            windows: g.windows.map(w => ({
+              label: w.label,
+              remaining: `${w.remainingPercent}%`,
+              used: `${w.usedPercent}%`,
+              subtitle: w.subtitle,
+            })),
           })),
-        })),
-      })),
+        }
+      }),
     }
   }
 }

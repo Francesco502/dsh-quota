@@ -6,7 +6,10 @@ export class OpenAIBillingProvider implements IQuotaProvider {
   category = 'official_cloud' as const
 
   private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string } {
-    const apiKey = (accountConfig?.apiKey || config.openai_billing?.apiKey || process.env.OPENAI_API_KEY || '').trim()
+    let apiKey = ''
+    if (accountConfig && accountConfig.apiKey !== undefined) apiKey = accountConfig.apiKey
+    else if (config.openai_billing && config.openai_billing.apiKey !== undefined) apiKey = config.openai_billing.apiKey
+    apiKey = apiKey.trim().replace(/^Bearer\s+/i, '')
     const baseUrl = (accountConfig?.baseUrl || config.openai_billing?.baseUrl || 'https://api.openai.com').replace(/\/+$/, '')
     return { apiKey, baseUrl }
   }

@@ -6,7 +6,10 @@ export class GLMProvider implements IQuotaProvider {
   category = 'domestic_llm' as const
 
   private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string } {
-    const apiKey = (accountConfig?.apiKey || config.glm?.apiKey || process.env.ZHIPU_API_KEY || '').trim()
+    let apiKey = ''
+    if (accountConfig && accountConfig.apiKey !== undefined) apiKey = accountConfig.apiKey
+    else if (config.glm && config.glm.apiKey !== undefined) apiKey = config.glm.apiKey
+    apiKey = apiKey.trim().replace(/^Bearer\s+/i, '')
     const baseUrl = (accountConfig?.baseUrl || config.glm?.baseUrl || 'https://open.bigmodel.cn').replace(/\/+$/, '')
     return { apiKey, baseUrl }
   }
@@ -57,7 +60,7 @@ export class GLMProvider implements IQuotaProvider {
   async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'glm'
     const cardName = accountConfig?.name || '智谱清言 (GLM)'
-    const { apiKey } = this.resolveKey(config, accountConfig)
+    const { apiKey, baseUrl } = this.resolveKey(config, accountConfig)
 
     if (!apiKey) {
       return {
@@ -75,6 +78,18 @@ export class GLMProvider implements IQuotaProvider {
     }
 
     try {
+      const res = await fetchWithProxy(`${baseUrl}/api/paas/v4/models`, {
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      }, config.httpProxy, 10000)
+
+      if (!res.ok) {
+        throw new Error(`智谱 API 验证失败 (${res.status})`)
+      }
+
+      const data = await res.json() as any
+      const modelCount = Array.isArray(data.data) ? data.data.length : 0
+      const subtitle = modelCount > 0 ? `智谱在线 · 已就绪 ${modelCount} 个模型` : 'API 凭据有效 · 额度正常'
+
       return {
         card: {
           id: cardId,
@@ -90,7 +105,7 @@ export class GLMProvider implements IQuotaProvider {
                 {
                   id: 'glm-status',
                   label: 'GLM API 可用状态',
-                  subtitle: 'API 凭据有效 · 额度正常',
+                  subtitle,
                   usedPercent: 0,
                   remainingPercent: 100,
                   barType: 'circle',

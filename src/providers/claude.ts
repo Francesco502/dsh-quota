@@ -5,13 +5,17 @@ export class ClaudeProvider implements IQuotaProvider {
   name = 'claude'
   category = 'official_cloud' as const
 
-  private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): string {
-    return (accountConfig?.apiKey || config.claude?.apiKey || process.env.ANTHROPIC_API_KEY || '').trim()
+  private resolveTarget(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string } {
+    let apiKey = (accountConfig?.apiKey !== undefined
+      ? accountConfig.apiKey
+      : (config.claude?.apiKey || '')).trim()
+    const baseUrl = (accountConfig?.baseUrl || config.claude?.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')
+    return { apiKey, baseUrl }
   }
 
   async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
     const start = Date.now()
-    const apiKey = this.resolveKey(config, accountConfig)
+    const { apiKey, baseUrl } = this.resolveTarget(config, accountConfig)
     if (!apiKey) {
       return {
         ok: false,
@@ -21,19 +25,12 @@ export class ClaudeProvider implements IQuotaProvider {
     }
 
     try {
-      // Light ping to Anthropic API
-      const res = await fetchWithProxy('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
+      const res = await fetchWithProxy(`${baseUrl}/v1/models`, {
         headers: {
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
+          Accept: 'application/json',
         },
-        body: JSON.stringify({
-          model: 'claude-3-haiku-20240307',
-          max_tokens: 1,
-          messages: [{ role: 'user', content: 'hi' }],
-        }),
       }, config.httpProxy, 10000)
 
       const latencyMs = Date.now() - start
@@ -66,7 +63,7 @@ export class ClaudeProvider implements IQuotaProvider {
   async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'claude'
     const cardName = accountConfig?.name || 'Anthropic Claude'
-    const apiKey = this.resolveKey(config, accountConfig)
+    const { apiKey, baseUrl } = this.resolveTarget(config, accountConfig)
 
     if (!apiKey) {
       return {
@@ -84,13 +81,40 @@ export class ClaudeProvider implements IQuotaProvider {
     }
 
     try {
+      const res = await fetchWithProxy(`${baseUrl}/v1/models`, {
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          Accept: 'application/json',
+        },
+      }, config.httpProxy, 10000)
+
+      if (!res.ok) {
+        throw new Error(`Claude API 验证失败 (${res.status})`)
+      }
+
+      const reqRemaining = res.headers.get('anthropic-ratelimit-requests-remaining')
+      const reqLimit = res.headers.get('anthropic-ratelimit-requests-limit')
+      let remPercent = 100
+      let subtitle = 'API 凭据有效 · 额度正常'
+
+      if (reqRemaining && reqLimit) {
+        const rem = parseInt(reqRemaining, 10)
+        const lim = parseInt(reqLimit, 10)
+        if (lim > 0) {
+          remPercent = Math.max(0, Math.min(100, Math.round((rem / lim) * 100)))
+          subtitle = `速率余量: ${remPercent}% (${rem}/${lim})`
+        }
+      }
+      const usedPercent = 100 - remPercent
+
       return {
         card: {
           id: cardId,
           name: cardName,
           provider: 'claude',
           category: this.category,
-          status: 'ok',
+          status: remPercent <= 15 ? 'warn' : 'ok',
           plan: 'Anthropic Claude',
           groups: [
             {
@@ -99,9 +123,9 @@ export class ClaudeProvider implements IQuotaProvider {
                 {
                   id: 'claude-active',
                   label: 'API Key 可用状态',
-                  subtitle: 'API 凭据有效 · 额度正常',
-                  usedPercent: 0,
-                  remainingPercent: 100,
+                  subtitle,
+                  usedPercent,
+                  remainingPercent: remPercent,
                   barType: 'circle',
                 },
               ],

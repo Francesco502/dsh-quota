@@ -283,12 +283,48 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     return map[provider] || provider.slice(0, 3).toUpperCase()
   }
 
-  function getMetricsList(cards: AuthCardItem[], selectedMetrics?: string[]): Array<{
+  function isMetricSelected(cardProvider: string, cardId: string, groupTitle: string, windowId: string, selectedMetrics?: string[]): boolean {
+    if (!Array.isArray(selectedMetrics)) return true
+    const hasCustomSelection = selectedMetrics.some(k => typeof k === 'string' && (k.startsWith(`${cardProvider}::`) || k.startsWith(`${cardId}::`)))
+    if (!hasCustomSelection) return true
+
+    const exactKey = makeHudMetricKey(cardProvider, groupTitle, windowId)
+    if (selectedMetrics.includes(exactKey)) return true
+
+    // Flexible match for antigravity weekly / 5h
+    if (cardProvider === 'antigravity') {
+      const isWeekly = windowId.toLowerCase().includes('weekly')
+      const isGemini = groupTitle.toLowerCase().includes('gemini') || windowId.toLowerCase().includes('gemini')
+      for (const sel of selectedMetrics) {
+        if (typeof sel !== 'string' || !sel.startsWith('antigravity::')) continue
+        const lower = decodeURIComponent(sel).toLowerCase()
+        if (isGemini && isWeekly && lower.includes('gemini') && lower.includes('weekly')) return true
+        if (isGemini && !isWeekly && lower.includes('gemini') && (lower.includes('5h') || lower.includes('5-hour') || lower.includes('five'))) return true
+        if (!isGemini && isWeekly && (lower.includes('claude') || lower.includes('gpt')) && lower.includes('weekly')) return true
+        if (!isGemini && !isWeekly && (lower.includes('claude') || lower.includes('gpt')) && (lower.includes('5h') || lower.includes('5-hour') || lower.includes('five'))) return true
+      }
+    }
+
+    // Flexible match for Balance cards
+    if (groupTitle === 'Balance' || windowId === cardId || windowId.endsWith('-balance')) {
+      for (const sel of selectedMetrics) {
+        if (typeof sel === 'string' && (sel.startsWith(`${cardProvider}::`) || sel.startsWith(`${cardId}::`))) {
+          const lower = decodeURIComponent(sel).toLowerCase()
+          if (lower.includes('balance') || lower.includes('余额') || lower.includes('额度')) return true
+        }
+      }
+    }
+
+    return false
+  }
+
+  function getMetricsList(cards: AuthCardItem[], config?: QuotaConfig): Array<{
     key: string
     provider: string
     name: string
     tag: string
     remainingPercent: number
+    balanceText?: string
   }> {
     const list: Array<{
       key: string
@@ -296,37 +332,57 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       name: string
       tag: string
       remainingPercent: number
+      balanceText?: string
     }> = []
+
+    const hudProviders = config?.floatingHudProviders
+    const selectedMetrics = config?.floatingHudMetrics
 
     for (const card of cards) {
       if (card.status !== 'ok' && card.status !== 'warn') continue
+
+      // Filter by floatingHudProviders if configured
+      if (Array.isArray(hudProviders)) {
+        if (!hudProviders.includes(card.id) && !hudProviders.includes(card.provider)) {
+          continue
+        }
+      }
+
       const tag = getProviderTag(card.provider)
 
       if (card.groups.length === 0 && card.balance?.total) {
         const rem = card.balance.remaining !== undefined ? Math.round((card.balance.remaining / card.balance.total) * 100) : 100
         const key = makeHudMetricKey(card.provider, 'Balance', card.id)
-        if (selectedMetrics === undefined || selectedMetrics.includes(key)) {
-          list.push({
-            key,
-            provider: card.provider,
-            name: `${card.name} · 账户余额`,
-            tag,
-            remainingPercent: Math.max(0, Math.min(100, rem)),
-          })
+        if (!isMetricSelected(card.provider, card.id, 'Balance', card.id, selectedMetrics)) {
+          continue
         }
+        const sym = card.balance.currency === 'USD' ? '$' : '¥'
+        list.push({
+          key,
+          provider: card.provider,
+          name: `${card.name} · 账户余额`,
+          tag,
+          remainingPercent: Math.max(0, Math.min(100, rem)),
+          balanceText: `${sym}${Number(card.balance.remaining ?? 0).toFixed(1)}`,
+        })
         continue
       }
 
       for (const group of card.groups) {
         for (const window of group.windows) {
           const key = makeHudMetricKey(card.provider, group.title, window.id)
-          if (selectedMetrics !== undefined && !selectedMetrics.includes(key)) continue
+          if (!isMetricSelected(card.provider, card.id, group.title, window.id, selectedMetrics)) {
+            continue
+          }
+          const isBalance = card.balance?.remaining !== undefined && (card.provider === 'deepseek' || window.barType === 'balance' as any)
+          const sym = card.balance?.currency === 'USD' ? '$' : '¥'
           list.push({
             key,
             provider: card.provider,
             name: `${card.name} · ${group.title} · ${window.label}`,
             tag,
             remainingPercent: Math.max(0, Math.min(100, Math.round(window.remainingPercent))),
+            balanceText: isBalance ? `${sym}${Number(card.balance!.remaining).toFixed(1)}` : undefined,
           })
         }
       }
@@ -354,7 +410,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     }
     hudEl.style.display = 'flex'
 
-    const metrics = getMetricsList(state.cards, state.config?.floatingHudMetrics)
+    const metrics = getMetricsList(state.cards, state.config)
 
     // Calculate smart collision position for Popover
     const isNearTop = pos.y < 200
@@ -397,7 +453,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       return `
         <div class="dsh-hud-popover-row">
           <span class="dsh-hud-popover-name" title="${m.name}">${m.name}</span>
-          <span class="dsh-hud-popover-val" style="color: ${color};">${m.remainingPercent}% 剩余</span>
+          <span class="dsh-hud-popover-val" style="color: ${color};">${m.balanceText || `${m.remainingPercent}% 剩余`}</span>
         </div>
       `
     }).join('')
@@ -411,7 +467,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
             style="transition: stroke-dashoffset 0.4s ease, stroke 0.3s ease;"/>
         </svg>
         <div class="dsh-hud-content">
-          <span class="dsh-hud-percent">${current.remainingPercent}%</span>
+          <span class="dsh-hud-percent" style="${current.balanceText ? 'font-size: 9.5px; font-weight: 700;' : ''}">${current.balanceText || `${current.remainingPercent}%`}</span>
           <span class="dsh-hud-tag">${current.tag}</span>
         </div>
         <div class="dsh-hud-popover ${popoverVClass} ${popoverHClass}">
@@ -428,7 +484,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   intervalTimer = setInterval(() => {
     if (isHovered || isDragging) return // Pause carousel on hover or dragging
     const state = controller.getSnapshot()
-    const metrics = getMetricsList(state.cards, state.config?.floatingHudMetrics)
+    const metrics = getMetricsList(state.cards, state.config)
     if (metrics.length > 1) {
       activeIndex = (activeIndex + 1) % metrics.length
       render()

@@ -1,6 +1,6 @@
 import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 
 /**
  * Cross-platform path resolver for user application data directories.
@@ -63,4 +63,22 @@ export function getHomeConfigPaths(folderName: string, fileName: string): string
   }
 
   return [...new Set(paths.filter(Boolean))]
+}
+
+/**
+ * Atomically writes JSON to a file via temporary file replacement.
+ * Prevents 0-byte corrupted files if application crashes or power cuts during write.
+ */
+export function atomicWriteJsonSync(filePath: string, data: any, mode = 0o600): void {
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`
+  try {
+    writeFileSync(tmpPath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode })
+    renameSync(tmpPath, filePath)
+  } catch {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath)
+    } catch {}
+    // Fallback direct write
+    writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode })
+  }
 }

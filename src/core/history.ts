@@ -2,6 +2,7 @@ import type { AuthCardItem, QuotaHistoryPoint } from './types.ts'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { atomicWriteJsonSync } from './paths.ts'
 
 interface HistoryStoreData {
   version: number
@@ -49,7 +50,7 @@ export class QuotaHistoryManager {
         version: 1,
         records: Object.fromEntries(this.records.entries()),
       }
-      writeFileSync(this.historyPath, JSON.stringify(obj, null, 2), { encoding: 'utf8', mode: 0o600 })
+      atomicWriteJsonSync(this.historyPath, obj, 0o600)
       this.lastSaveTime = Date.now()
     } catch {}
   }
@@ -92,7 +93,8 @@ export class QuotaHistoryManager {
 
       // Avoid duplicate points within 5 minutes if value hasn't changed
       const lastPoint = list[list.length - 1]
-      if (lastPoint && (now - lastPoint.timestamp < 5 * 60 * 1000) && lastPoint.remainingPercent === point.remainingPercent) {
+      const isBalanceChanged = card.balance?.remaining !== undefined && lastPoint && lastPoint.remainingBalance !== card.balance.remaining
+      if (lastPoint && (now - lastPoint.timestamp < 5 * 60 * 1000) && lastPoint.remainingPercent === point.remainingPercent && !isBalanceChanged) {
         continue
       }
 
@@ -115,6 +117,59 @@ export class QuotaHistoryManager {
     const list = this.records.get(instanceId) || []
     const cutoff = Date.now() - days * 24 * 3600 * 1000
     return list.filter(p => p.timestamp >= cutoff)
+  }
+
+  /**
+   * Calculates recent usage activity trend points (7 days, daily bins).
+   * Returns normalized 0~100 activity values representing usage change.
+   */
+  getUsageTrendPoints(instanceId: string, days = 7): Array<{ t: number; r: number }> {
+    const list = this.records.get(instanceId) || []
+    const now = Date.now()
+    const startTime = now - days * 24 * 3600 * 1000
+    const recentPoints = list.filter(p => p.timestamp >= startTime).sort((a, b) => a.timestamp - b.timestamp)
+
+    const numBins = 7
+    const binDuration = (days * 24 * 3600 * 1000) / numBins
+    const usageBins: number[] = new Array(numBins).fill(0)
+
+    if (recentPoints.length >= 2) {
+      for (let i = 1; i < recentPoints.length; i++) {
+        const prev = recentPoints[i - 1]!
+        const curr = recentPoints[i]!
+        const binIndex = Math.min(numBins - 1, Math.max(0, Math.floor((curr.timestamp - startTime) / binDuration)))
+
+        if (prev.remainingBalance !== undefined && curr.remainingBalance !== undefined) {
+          const deltaBal = prev.remainingBalance - curr.remainingBalance
+          if (deltaBal > 0) {
+            usageBins[binIndex] += deltaBal
+          }
+        } else {
+          const prevUsed = prev.usedPercent ?? (100 - prev.remainingPercent)
+          const currUsed = curr.usedPercent ?? (100 - curr.remainingPercent)
+          const deltaUsed = currUsed - prevUsed
+          if (deltaUsed > 0) {
+            usageBins[binIndex] += deltaUsed
+          }
+        }
+      }
+    }
+
+    const maxUsage = Math.max(...usageBins)
+    const points: Array<{ t: number; r: number }> = []
+
+    for (let i = 0; i < numBins; i++) {
+      const binTime = startTime + i * binDuration + binDuration / 2
+      if (maxUsage <= 0) {
+        points.push({ t: binTime, r: 0 })
+      } else {
+        const val = usageBins[i]!
+        const normalized = val > 0 ? Math.min(100, Math.round((val / maxUsage) * 85 + 10)) : 0
+        points.push({ t: binTime, r: normalized })
+      }
+    }
+
+    return points
   }
 
   /**

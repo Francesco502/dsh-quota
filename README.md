@@ -1,10 +1,10 @@
 # @francescoli/dsh-quota: DSH AI 额度与用量监控插件
 
-[![version](https://img.shields.io/badge/version-v0.2.2-blue.svg)](./package.json)
+[![version](https://img.shields.io/badge/version-v0.3.0-blue.svg)](./package.json)
 [![npm](https://img.shields.io/badge/npm-@francescoli/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francescoli/dsh-quota)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-> 当前版本：**v0.2.2**
+> 当前版本：**v0.3.0**
 
 专门为 **DeepSeek Harness (DSH)** 打造的全功能 AI 服务额度、余额与用量监控插件。集中监控并展示 **DeepSeek 官方平台**、**Cursor**、**Codex (ChatGPT)**、**Google Antigravity**、**GitHub Copilot**、**OpenAI Platform**、**Anthropic Claude**、**Kimi**、**智谱 GLM**、**MiniMax**、**阿里通义千问**、**火山方舟**、**OpenCode-Go** 及 **OneAPI / NewAPI** 兼容中转的实时剩余额度、用量、充值余额、消耗速率及重置周期。
 
@@ -12,10 +12,10 @@
 
 ## ✨ 核心特性
 
-1. **14+ 家服务全聚合**：
-   - **国内大模型**：DeepSeek（充值/赠金实时查询）、Kimi（代金券/余额）、智谱 GLM、MiniMax（海螺）、通义千问（百炼）、火山方舟（豆包）；
+1. **16+ 家服务全聚合**：
+   - **国内大模型**：DeepSeek（充值/赠金实时查询）、硅基流动 SiliconFlow（实时余额与充值金）、Kimi（代金券/余额）、智谱 GLM、MiniMax（海螺）、通义千问（百炼）、火山方舟（豆包）；
    - **IDE 编程助手**：Cursor（免密读取 SQLite `state.vscdb`）、Google Antigravity（CloudCode 配额）、GitHub Copilot（本地凭据探测）；
-   - **海外官方与聚合**：Codex (ChatGPT Wham)、OpenAI Platform Billing、Anthropic Claude、OpenCode-Go、OneAPI / NewAPI 中转。
+   - **海外官方与聚合**：OpenRouter（全局配额/用量）、Codex (ChatGPT Wham)、OpenAI Platform Billing、Anthropic Claude、OpenCode-Go、OneAPI / NewAPI 中转。
 2. **直观数据看板与 HUD 悬浮环**：
    - **概览看板**：顶部 4 宫格总览、分类筛选 Tab、多模型分组折叠 (Accordion) 与宋代青绿雅致配色；
    - **HUD 悬浮环**：支持鼠标悬停暂停轮播、数字平滑过渡、视口边界防溢出自动翻转、贴边微缩模式；

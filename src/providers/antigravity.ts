@@ -305,25 +305,36 @@ export class AntigravityProvider implements IQuotaProvider {
       if (summaryData?.groups && Array.isArray(summaryData.groups)) {
         for (const g of summaryData.groups) {
           const windows: MetricWindow[] = []
+          const isGemini = (g.displayName || '').toLowerCase().includes('gemini')
+          const isClaude = (g.displayName || '').toLowerCase().includes('claude') || (g.displayName || '').toLowerCase().includes('gpt')
           for (const b of (g.buckets || [])) {
             const frac = b.remainingFraction ?? 1.0
             const rem = Math.max(0, Math.min(100, Math.round(frac * 100)))
             const isWeekly = b.window === 'WINDOW_WEEKLY' || (b.displayName && b.displayName.toLowerCase().includes('weekly'))
             const subtitle = formatQuotaResetText(b.resetTime, 100 - rem, Boolean(isWeekly))
 
-            windows.push({
-              id: b.bucketId || b.displayName,
-              label: isWeekly ? 'Weekly Limit' : '5-Hour Limit',
-              subtitle,
-              usedPercent: 100 - rem,
-              remainingPercent: rem,
-              resetAt: b.resetTime,
-              barType: 'circle',
-            })
+            let winId = b.bucketId || b.displayName || (isWeekly ? 'weekly' : '5h')
+            if (isGemini) {
+              winId = isWeekly ? 'gemini-weekly' : 'gemini-5h'
+            } else if (isClaude) {
+              winId = isWeekly ? 'claude-weekly' : 'claude-5h'
+            }
+
+            if (!windows.some(w => w.id === winId)) {
+              windows.push({
+                id: winId,
+                label: isWeekly ? 'Weekly Limit' : '5-Hour Limit',
+                subtitle,
+                usedPercent: 100 - rem,
+                remainingPercent: rem,
+                resetAt: b.resetTime,
+                barType: 'circle',
+              })
+            }
           }
           if (windows.length > 0) {
             groups.push({
-              title: g.displayName || 'Model Quotas',
+              title: g.displayName || (isGemini ? 'Gemini Models' : (isClaude ? 'Claude and GPT models' : 'Model Quotas')),
               hasInfoIcon: true,
               windows,
             })
@@ -369,19 +380,22 @@ export class AntigravityProvider implements IQuotaProvider {
             const is5Hour = id.toLowerCase().includes('five') || id.toLowerCase().includes('5hour') || (model.displayName && model.displayName.toLowerCase().includes('five'))
             const cleanLabel = isWeekly ? 'Weekly Limit' : is5Hour ? '5-Hour Limit' : (model.displayName || id)
             const subtitle = formatQuotaResetText(quota.resetTime, 100 - rem, Boolean(isWeekly))
-            const item: MetricWindow = {
-              id,
-              label: cleanLabel,
-              subtitle,
-              usedPercent: 100 - rem,
-              remainingPercent: rem,
-              resetAt: quota.resetTime,
-              barType: 'circle',
-            }
-            if (id.toLowerCase().includes('gemini')) {
-              geminiWindows.push(item)
-            } else {
-              claudeGptWindows.push(item)
+            const isGemini = id.toLowerCase().includes('gemini')
+            const winId = isGemini
+              ? (isWeekly ? 'gemini-weekly' : 'gemini-5h')
+              : (isWeekly ? 'claude-weekly' : 'claude-5h')
+
+            const targetList = isGemini ? geminiWindows : claudeGptWindows
+            if (!targetList.some(w => w.id === winId)) {
+              targetList.push({
+                id: winId,
+                label: cleanLabel,
+                subtitle,
+                usedPercent: 100 - rem,
+                remainingPercent: rem,
+                resetAt: quota.resetTime,
+                barType: 'circle',
+              })
             }
           }
 

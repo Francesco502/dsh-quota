@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.2] - 2026-08-26
+## [0.3.0] - 2026-09-14
+
+### Added
+- **Provider 矩阵扩充 (16+ 家)**：
+  - 新增 **硅基流动 (SiliconFlow)** 官方 Provider：直读账户可用余额、充值金，低额度自动预警，支持独立测活；
+  - 新增 **OpenRouter** 官方 Provider：读取 API Key 限额 (limit)、实际用量 (usage) 与速率限制，无硬限额场景自适应展示；
+  - 前端抽屉与 HUD 指标选择全面接入 SiliconFlow 与 OpenRouter。
+- **高并发请求池调度 (Concurrency Pool)**：
+  - 实现通用 `runWithConcurrency` 异步任务并发限制器，在看板全量刷新与「一键全部测活」时将最大瞬发并发数限制在 5，防止网络突发导致第三方 API 触发 HTTP 429 或本地 Socket 耗尽。
+- **配置无感备份与跨机迁移 (Backup & Restore)**：
+  - 偏好设置中增加「导出脱敏备份」按钮，自动对所有 Provider 的 API Key、Session Token 与 OAuth 凭据进行脱敏遮盖（`***`），安全分享；
+  - 增加「完整配置导出」按钮，方便多台开发设备间快速克隆迁移；
+  - 增加「导入配置文件」按钮，支持本地 JSON 文件解析、格式校验与二次确认覆盖生效。
+- **DSH Agent 智能路由器强化**：
+  - 工具 `get_quota_status` 响应中新增具体的机器调用模型标识符 `primaryModelId`、`availableModels` 及候选路由中的 `modelId`（如 `deepseek-chat`、`deepseek-ai/DeepSeek-V3`、`gemini-2.0-flash`），AI Agent 可直接用作子代理派发参数。
+- **Sparkline 趋势图原生悬停 Tooltip**：
+  - 在每个数据点上增加 `<circle><title>M/D 相对用量: X%</title></circle>`，悬停可直接查看具体日期的用量强度。
+
+### Fixed
+- **修复 Cursor 忽略 HTTP 代理与无超时保护问题**：全面改用 `fetchWithProxy`，继承用户设置的 `httpProxy` 并增加 12s 超时防挂起。
+- **实现 Codex (ChatGPT) Token 401 静默自动续期**：检测到 HTTP 401 鉴权失效时，自动使用本地 `refresh_token` 换取新令牌并原子更新 `auth.json` 与配置，避免频繁提示重新登录。
+- **根治 Claude / GLM / MiniMax 的虚假正常状态 (False Positive)**：接入轻量模型列表或状态探测，杜绝未填有效 Key 时显示虚假绿灯。
+- **落地 Custom API balancePath 自定义路径与多级降级探测**：打通 `balancePath`，并按顺序自动降级支持 OneAPI `/v1/dashboard/billing/subscription`、NewAPI `/api/user/self` 及 `/v1/models`。
+- **解决后台定时轮询冲掉用户输入与光标丢失缺陷**：在 `update()` 中加入打开状态的模态保护，正在配置抽屉或弹窗时跳过全量 DOM 覆写。
+- **存储原子写盘防 0 字节损坏**：实现 `atomicWriteJsonSync`（经 `.tmp` 文件写入后通过操作系统的 `renameSync` 原子重命名替换），彻底规避断电或崩溃时配置文件损坏的隐患；并在 Node.js 进程退出前自动刷新落盘用量历史。
+
+## [0.2.4] - 2026-09-08
+
+### Changed
+- **界面优化**：去除「一键全部测活」按钮中的“⚡”表情符号，保持视觉素雅克制。
+- **平台凭据选择重构**：平台凭据配置改为下拉平台选择器，选中对应平台后按需加载表单，避免长列表滚动负担。
+- **独立保存与删除确认**：各个平台支持独立的保存配置按钮，点击后提供即时 Toast 反馈；删除凭据时提供二次确认模态对话框 (Modal)，防止误删。
+- **看板、悬浮球与服务凭据深度联动**：
+  - 仅已配置有效凭据/API Key 的平台及自定义中转站才会加入「服务展示与排序」列表；
+  - 列表为每个服务配备「看板」与「悬浮球」两个独立勾选框，分别控制在概览面板与桌面 HUD 轮播中的展示；
+  - 移除了冗余的列表表头行（“已配置凭据服务 / 展示位置 / 排序”），并去除旧式的显式 `↑` / `↓` 排序按钮，支持直接点击卡片按住拖动（Drag & Drop）进行直观平滑排序。
+- **配置持久化安全增强**：优化配置写入机制，局部保存与全局设置保存互不干扰，确保未在 DOM 中的平台 Key 不被意外覆盖清空。
+
+## [0.2.3] - 2026-09-04
+
+### Fixed
+- **适配 DSH 最新版本 (0.1.2-rc.1+) 客户端模块加载机制**：
+  - 修复 `cordis.patch.yml` 中包声明名称与 `package.json` 中的 `@francescoli/dsh-quota` 匹配，解决 `dsh-client-modules` 的 `nearestPackage` / `resolveMeta` 校验失败导致客户端 Bundle 未注入 `window.__DSH_BOOT__` 的关键缺陷；
+  - 移除 `package.json` 及 `src/client/index.ts` 中多余的客户端服务注入声明（`sessions`, `workspaces` 等未导出服务），防止 `assertEntriesActive` 启动门禁阻塞；
+  - 客户端 Bundle (`bundle-client.mjs`) 双向注册 `@francescoli/dsh-quota` 与 `dsh-quota` 模块工厂，确保模块系统在不同引入路径下均能即时实例化；
+  - 规范化 Agent Tool `get_quota_status` 注册契约，无缝兼容 `@deepseek-ai/dsh-tools` 的 `ctx.tools.register`（支持 `output { schema, render }` 标准结构），同时向下兼容旧版 `ctx.agent.registerTool`。
 
 ### Added
 - **Sparkline 7 天自适应趋势折线图**：重构并增强纯 SVG 趋势图渲染，支持初次启动无历史时的自适应平滑基准线与真实 7 天时序采样混合渲染，确保任意时刻即时呈现高清晰折线图。

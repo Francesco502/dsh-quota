@@ -6,7 +6,10 @@ export class KimiProvider implements IQuotaProvider {
   category = 'domestic_llm' as const
 
   private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string } {
-    const apiKey = (accountConfig?.apiKey || config.kimi?.apiKey || process.env.MOONSHOT_API_KEY || '').trim()
+    let apiKey = ''
+    if (accountConfig && accountConfig.apiKey !== undefined) apiKey = accountConfig.apiKey
+    else if (config.kimi && config.kimi.apiKey !== undefined) apiKey = config.kimi.apiKey
+    apiKey = apiKey.trim().replace(/^Bearer\s+/i, '')
     const baseUrl = (accountConfig?.baseUrl || config.kimi?.baseUrl || 'https://api.moonshot.cn').replace(/\/+$/, '')
     return { apiKey, baseUrl }
   }

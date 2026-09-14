@@ -16,7 +16,10 @@ export class DeepSeekProvider implements IQuotaProvider {
   category = 'domestic_llm' as const
 
   private resolveKey(config: QuotaConfig, accountConfig?: AccountConfigItem): { apiKey: string; baseUrl: string } {
-    const apiKey = (accountConfig?.apiKey || config.deepseek?.apiKey || process.env.DEEPSEEK_API_KEY || '').trim()
+    let apiKey = (accountConfig && accountConfig.apiKey !== undefined
+      ? accountConfig.apiKey
+      : (config.deepseek?.apiKey || process.env.DEEPSEEK_API_KEY || '')).trim()
+    apiKey = apiKey.replace(/^Bearer\s+/i, '')
     const baseUrl = (accountConfig?.baseUrl || config.deepseek?.baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '')
     return { apiKey, baseUrl }
   }
@@ -43,11 +46,24 @@ export class DeepSeekProvider implements IQuotaProvider {
 
       const latencyMs = Date.now() - start
       if (!res.ok) {
+        let detail = `HTTP ${res.status}`
+        try {
+          const errData = await res.json() as any
+          if (errData?.error?.message) {
+            detail = errData.error.message
+          } else if (res.status === 401) {
+            detail = 'API Key 无效或未授权 (HTTP 401)'
+          } else if (res.status === 403) {
+            detail = '无访问权限或 IP 受限 (HTTP 403)'
+          }
+        } catch {
+          if (res.status === 401) detail = 'API Key 无效或已过期 (HTTP 401)'
+        }
         return {
           ok: false,
           provider: 'deepseek',
           latencyMs,
-          message: `连接失败: HTTP ${res.status}`,
+          message: `验证失败: ${detail}`,
         }
       }
 
@@ -67,14 +83,14 @@ export class DeepSeekProvider implements IQuotaProvider {
         ok: false,
         provider: 'deepseek',
         latencyMs: Date.now() - start,
-        message: `请求异常: ${err.message}`,
+        message: `网络请求异常: ${err.message}`,
       }
     }
   }
 
   async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'deepseek'
-    const cardName = accountConfig?.name || 'DeepSeek 官方 API'
+    const cardName = accountConfig?.name || config.customNames?.deepseek || config.deepseek?.name || 'DeepSeek'
     const { apiKey, baseUrl } = this.resolveKey(config, accountConfig)
 
     if (!apiKey) {
@@ -127,7 +143,7 @@ export class DeepSeekProvider implements IQuotaProvider {
           provider: 'deepseek',
           category: this.category,
           status: !isAvailable || totalAmount <= 0 ? 'error' : (totalAmount < 5 ? 'warn' : 'ok'),
-          plan: 'DeepSeek Platform',
+          plan: 'DeepSeek',
           account: `¥${totalAmount.toFixed(2)} CNY`,
           balance: {
             currency: 'CNY',
@@ -138,15 +154,15 @@ export class DeepSeekProvider implements IQuotaProvider {
           },
           groups: [
             {
-              title: 'DeepSeek 账户余额',
+              title: '账户余额',
               windows: [
                 {
                   id: 'deepseek-balance',
-                  label: '账户总可用余额 (CNY)',
-                  subtitle,
+                  label: '可用余额',
+                  subtitle: `充值: ¥${toppedUpBalance.toFixed(2)} · 赠送: ¥${grantedBalance.toFixed(2)}`,
                   usedPercent,
                   remainingPercent: remPercent,
-                  barType: 'circle',
+                  barType: 'balance' as any,
                 },
               ],
             },

@@ -1,6 +1,6 @@
 import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
 import { formatQuotaResetText } from '../core/types.ts'
-import { getHomeConfigPaths } from '../core/paths.ts'
+import { getHomeConfigPaths, atomicWriteJsonSync } from '../core/paths.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fetchWithProxy } from '../core/fetch.ts'
 import { join } from 'node:path'
@@ -12,6 +12,14 @@ interface CodexAuth {
     refresh_token?: string
     account_id?: string
   }
+}
+
+interface LoadedCodexAuth {
+  accessToken: string
+  refreshToken?: string
+  accountId?: string
+  source: string
+  filePath?: string
 }
 
 interface UsageWindow {
@@ -41,16 +49,17 @@ export class CodexProvider implements IQuotaProvider {
     return [...new Set(paths)]
   }
 
-  private loadAuth(config: QuotaConfig, accountConfig?: AccountConfigItem): { accessToken: string; accountId?: string; source: string } | null {
+  private loadAuth(config: QuotaConfig, accountConfig?: AccountConfigItem): LoadedCodexAuth | null {
     if (accountConfig?.oauth?.accessToken) {
       return {
         accessToken: accountConfig.oauth.accessToken,
+        refreshToken: accountConfig.oauth.refreshToken,
         accountId: accountConfig.oauth.accountId,
         source: accountConfig.name || 'Codex 账号',
       }
     }
 
-    const localCandidates: Array<{ accessToken: string; accountId?: string; source: string; modifiedAt: number }> = []
+    const localCandidates: Array<LoadedCodexAuth & { modifiedAt: number }> = []
 
     if (config.codex?.autoDetectLocal !== false && accountConfig?.autoDetectLocal !== false) {
       for (const path of this.authPaths()) {
@@ -60,8 +69,10 @@ export class CodexProvider implements IQuotaProvider {
           if (auth.tokens?.access_token) {
             localCandidates.push({
               accessToken: auth.tokens.access_token,
+              refreshToken: auth.tokens.refresh_token,
               accountId: auth.tokens.account_id,
               source: path,
+              filePath: path,
               modifiedAt: statSync(path).mtimeMs,
             })
           }
@@ -78,12 +89,60 @@ export class CodexProvider implements IQuotaProvider {
     if (config.codex?.oauth?.accessToken) {
       return {
         accessToken: config.codex.oauth.accessToken,
+        refreshToken: config.codex.oauth.refreshToken,
         accountId: config.codex.oauth.accountId,
         source: 'Codex OAuth 凭据',
       }
     }
 
     return null
+  }
+
+  private async refreshAccessToken(
+    creds: LoadedCodexAuth,
+    proxyUrl?: string
+  ): Promise<string | null> {
+    if (!creds.refreshToken) return null
+    try {
+      const clientId = 'app_EMoamEEZ73f0CkXaXp7hrann'
+      const tokenRes = await fetchWithProxy('https://auth.openai.com/oauth/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'codex-cli',
+          'Accept': 'application/json',
+        },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: clientId,
+          refresh_token: creds.refreshToken,
+        }),
+      }, proxyUrl, 12000)
+
+      if (!tokenRes.ok) return null
+      const data = await tokenRes.json() as any
+      const newAccessToken = data.access_token
+      const newRefreshToken = data.refresh_token || creds.refreshToken
+      if (!newAccessToken) return null
+
+      creds.accessToken = newAccessToken
+      creds.refreshToken = newRefreshToken
+
+      if (creds.filePath && existsSync(creds.filePath)) {
+        try {
+          const raw = readFileSync(creds.filePath, 'utf8')
+          const auth = JSON.parse(raw) as CodexAuth
+          if (!auth.tokens) auth.tokens = {}
+          auth.tokens.access_token = newAccessToken
+          auth.tokens.refresh_token = newRefreshToken
+          atomicWriteJsonSync(creds.filePath, auth, 0o600)
+        } catch {}
+      }
+
+      return newAccessToken
+    } catch {
+      return null
+    }
   }
 
   async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
@@ -105,7 +164,14 @@ export class CodexProvider implements IQuotaProvider {
       }
       if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
 
-      const res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000)
+      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000)
+      if (res.status === 401 && creds.refreshToken) {
+        const refreshed = await this.refreshAccessToken(creds, config.httpProxy)
+        if (refreshed) {
+          headers.Authorization = `Bearer ${refreshed}`
+          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000)
+        }
+      }
       const latencyMs = Date.now() - start
 
       if (res.ok) {
@@ -163,7 +229,14 @@ export class CodexProvider implements IQuotaProvider {
       }
       if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
 
-      const res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000)
+      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000)
+      if (res.status === 401 && creds.refreshToken) {
+        const refreshed = await this.refreshAccessToken(creds, config.httpProxy)
+        if (refreshed) {
+          headers.Authorization = `Bearer ${refreshed}`
+          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000)
+        }
+      }
       if (!res.ok) {
         const cloudflare = res.status === 403 && (res.headers.get('content-type') ?? '').includes('text/html')
         throw new Error(cloudflare
