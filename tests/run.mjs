@@ -179,6 +179,8 @@ assert.ok(clientBundle.includes('btn-export-full'), 'client.js must include btn-
 assert.ok(clientBundle.includes('btn-import-config'), 'client.js must include btn-import-config')
 assert.ok(clientBundle.includes('siliconflow'), 'client.js must include siliconflow')
 assert.ok(clientBundle.includes('openrouter'), 'client.js must include openrouter')
+assert.ok(clientBundle.includes('M3.49 13.26'), 'client.js must include official IconGaugeOutline16')
+assert.ok(!clientBundle.includes('dshQuotaPulse'), 'client.js must not include blurry dshQuotaPulse badge')
 assert.ok(!clientBundle.includes('sort-list-header'), 'client.js must not include redundant sort-list-header')
 assert.ok(!clientBundle.includes('btn-move-up'), 'client.js must not include explicit arrow move buttons')
 assert.ok(!clientBundle.includes('⚡ 一键全部测活'), 'client.js must not include lightning emoji in 一键全部测活')

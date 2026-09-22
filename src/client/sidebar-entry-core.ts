@@ -37,6 +37,7 @@ function newSessionButton(root: HTMLElement): HTMLButtonElement | undefined {
 function createEntry(options: SidebarEntryOptions): HTMLButtonElement {
   const entry = document.createElement('button')
   entry.type = 'button'
+  entry.spellcheck = false
   entry.setAttribute(options.rowAttribute, '')
   if (options.plugin !== undefined) {
     entry.setAttribute('data-dsh-plugin', options.plugin)
