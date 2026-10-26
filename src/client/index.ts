@@ -1,7 +1,7 @@
 /**
  * Client entry for dsh-quota Web UI.
  * @package dsh-quota
- * @version 0.3.0
+ * @version 0.3.1
  */
 import { QuotaClientApi } from './api.ts'
 import { QuotaController } from './controller.ts'
@@ -9,7 +9,7 @@ import { mountQuotaSidebarEntry } from './sidebar-entry.ts'
 import { mountPanel } from './mount.ts'
 import { mountQuotaHud } from './hud.ts'
 
-export const VERSION = '0.3.0'
+export const VERSION = '0.3.1'
 export const inject: string[] = []
 
 let applied = false

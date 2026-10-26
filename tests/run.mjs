@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -9,6 +10,7 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-quota-test-'))
 import {
   formatQuotaResetText,
   QuotaManager,
+  fetchWithProxy,
   getRefreshIntervalSeconds,
   DeepSeekProvider,
   CursorProvider,
@@ -31,7 +33,7 @@ import {
   DEFAULT_PROVIDER_ORDER,
 } from '../lib/index.js'
 
-console.log('Running dsh-quota v0.3.0 test suite...')
+console.log('Running dsh-quota v0.3.1 test suite...')
 
 // 1. Percentage calculation
 const calcPercent = (used, total) => {
@@ -258,6 +260,8 @@ assert.ok(clientBundle.includes('dsh-details-modal'), 'client.js contains dsh-de
 assert.ok(clientBundle.includes('dsh-details-modal-overlay'), 'client.js contains dsh-details-modal-overlay')
 assert.ok(clientBundle.includes('cb-hud-metric'), 'client.js contains cb-hud-metric')
 assert.ok(clientBundle.includes('Gemini 模型 · 周限额 (周用量)'), 'client.js contains Antigravity gemini weekly quota label')
+assert.ok(clientBundle.includes('cardStartIndex'), 'client.js contains HUD fallback for unmatched cards')
+assert.ok(clientBundle.includes('selWeekly'), 'client.js contains flexible weekly/5h Antigravity HUD matching')
 console.log('✓ detailed settings modal and HUD metrics selection verified')
 
 // 13. Verify Atomic JSON File Writing
@@ -285,4 +289,54 @@ assert.equal(concurrentRes[0].value, 0)
 assert.equal(concurrentRes[14].value, 28)
 console.log('✓ runWithConcurrency bounded at limit=5 passed')
 
-console.log('🎉 All dsh-quota v0.3.0 tests passed successfully!')
+// 15. Verify fetchWithProxy (proxy fallback & error decoration)
+const testServer = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, source: 'direct-server' }))
+})
+
+await new Promise((resolve) => testServer.listen(0, '127.0.0.1', resolve))
+const testPort = testServer.address().port
+const testServerUrl = `http://127.0.0.1:${testPort}/ping`
+
+try {
+  // Test A: Direct fetch without proxy
+  const resDirect = await fetchWithProxy(testServerUrl, {}, undefined, 5000)
+  assert.equal(resDirect.status, 200)
+  const jsonDirect = await resDirect.json()
+  assert.equal(jsonDirect.ok, true)
+
+  // Test B: Dead proxy fallback to direct fetch
+  const deadProxyUrl = 'http://127.0.0.1:59999'
+  const resFallback = await fetchWithProxy(testServerUrl, {}, deadProxyUrl, 5000)
+  assert.equal(resFallback.status, 200)
+  const jsonFallback = await resFallback.json()
+  assert.equal(jsonFallback.ok, true)
+
+  // Test C: Dead proxy with unreachable target yields informative dual error
+  let dualErrorCaught = false
+  try {
+    await fetchWithProxy('http://127.0.0.1:59998/unreachable', {}, deadProxyUrl, 2000)
+  } catch (err) {
+    dualErrorCaught = true
+    assert.match(err.message, /fetch failed: proxy \(/)
+    assert.match(err.message, /& direct \(/)
+  }
+  assert.ok(dualErrorCaught, 'Should catch dual proxy & direct failure error')
+
+  // Test D: Direct fetch error decoration includes error code
+  let directErrorCaught = false
+  try {
+    await fetchWithProxy('http://127.0.0.1:59998/unreachable', {}, undefined, 2000)
+  } catch (err) {
+    directErrorCaught = true
+    assert.match(err.message, /fetch failed \(/)
+  }
+  assert.ok(directErrorCaught, 'Should catch decorated direct failure error')
+
+  console.log('✓ fetchWithProxy proxy fallback & error decoration verified')
+} finally {
+  await new Promise((resolve) => testServer.close(resolve))
+}
+
+console.log('🎉 All dsh-quota v0.3.1 tests passed successfully!')

@@ -1,10 +1,10 @@
 # @francescoli/dsh-quota: DSH AI 额度与用量监控插件
 
-[![version](https://img.shields.io/badge/version-v0.3.0-blue.svg)](./package.json)
+[![version](https://img.shields.io/badge/version-v0.3.1-blue.svg)](./package.json)
 [![npm](https://img.shields.io/badge/npm-@francescoli/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francescoli/dsh-quota)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-> 当前版本：**v0.3.0**
+> 当前版本：**v0.3.1**
 
 专门为 **DeepSeek Harness (DSH)** 打造的全功能 AI 服务额度、余额与用量监控插件。集中监控并展示 **DeepSeek 官方平台**、**Cursor**、**Codex (ChatGPT)**、**Google Antigravity**、**GitHub Copilot**、**OpenAI Platform**、**Anthropic Claude**、**Kimi**、**智谱 GLM**、**MiniMax**、**阿里通义千问**、**火山方舟**、**OpenCode-Go** 及 **OneAPI / NewAPI** 兼容中转的实时剩余额度、用量、充值余额、消耗速率及重置周期。
 
@@ -61,7 +61,7 @@ dsh plugin --profile web add github:Francesco502/dsh-quota
 ```bash
 npm run build
 npm test
-pwsh -File .github/scripts/validate-release.ps1 -Tag v0.2.0
+pwsh -File .github/scripts/validate-release.ps1 -Tag v0.3.1
 ```
 
 ---

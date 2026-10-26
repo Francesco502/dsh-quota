@@ -1423,18 +1423,25 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     const isMetricChecked = (key: string): boolean => {
       if (!hasCustomSelection) return true
       if (!Array.isArray(selectedMetrics)) return true
+      if (selectedMetrics.includes(`${provId}::__none__`) || (target.kind === 'provider' && selectedMetrics.includes(`${target.id}::__none__`))) return false
       if (selectedMetrics.includes(key)) return true
       if (provId === 'antigravity') {
         const lowerKey = key.toLowerCase()
         const isWeekly = lowerKey.includes('weekly')
         const isGemini = lowerKey.includes('gemini')
+        const isClaude = lowerKey.includes('claude') || lowerKey.includes('gpt')
         return selectedMetrics.some(sel => {
           if (typeof sel !== 'string' || !sel.startsWith('antigravity::')) return false
+          if (sel.includes('__none__')) return false
           const l = decodeURIComponent(sel).toLowerCase()
-          if (isGemini && isWeekly) return l.includes('gemini') && l.includes('weekly')
-          if (isGemini && !isWeekly) return l.includes('gemini') && (l.includes('5h') || l.includes('5-hour') || l.includes('five'))
-          if (!isGemini && isWeekly) return (l.includes('claude') || l.includes('gpt')) && l.includes('weekly')
-          if (!isGemini && !isWeekly) return (l.includes('claude') || l.includes('gpt')) && (l.includes('5h') || l.includes('5-hour') || l.includes('five'))
+          const selWeekly = l.includes('weekly') || l.includes('周')
+          const sel5h = l.includes('5h') || l.includes('5-hour') || l.includes('five') || l.includes('5小时')
+          const selGemini = l.includes('gemini')
+          const selClaude = l.includes('claude') || l.includes('gpt')
+
+          if (isGemini && selGemini && ((isWeekly && selWeekly) || (!isWeekly && sel5h))) return true
+          if (isClaude && selClaude && ((isWeekly && selWeekly) || (!isWeekly && sel5h))) return true
+          if ((isWeekly && selWeekly) || (!isWeekly && sel5h)) return true
           return false
         })
       }
@@ -2180,7 +2187,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div class="quota-header">
           <div class="quota-title">
             <span>AI 额度监控</span>
-            <span class="quota-version-tag">v0.3.0</span>
+            <span class="quota-version-tag">v0.3.1</span>
             ${state.loading ? '<span style="font-size: 12px; font-weight: normal; color: var(--dsw-alias-brand-primary, #0969da); margin-left: 8px;">正在刷新...</span>' : ''}
           </div>
           <div style="display: flex; gap: 10px; align-items: center;">

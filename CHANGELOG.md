@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-26
+
+### Fixed
+- **修复 Undici 跨版本冲突导致的 fetch failed**：在 Node 内置 Undici (v7) 与外部 DSH 运行环境 Undici (v8) 存在版本差异时，统一采用同一 Undici 实例派发请求，彻底解决 `UND_ERR_INVALID_ARG` 异常。
+- **增强代理自动回退与智能重试机制**：为代理请求增加异常捕获与超时控制；当配置的 HTTP 代理端口未开启或不可达时，自动安全回退至直连重试，并提供精准的双重错误诊断信息。
+- **修复桌面悬浮球内容空白（未选择额度）问题**：
+  - 重构指标跨模型族自适应对齐：优化 Google Antigravity 配额匹配机制，无论上游接口动态下发 Gemini 还是 Claude & GPT 模型分组，周额度与 5 小时额度均能精准命中；
+  - 增加指标匹配兜底保护：当已启用悬浮球的服务因上游分组或 ID 漂移导致无指标匹配时，自动回退展示卡片可用窗口，杜绝悬浮球空白；
+  - 修复设置抽屉回显：同步修正详细设置中的指标复选框勾选判断逻辑。
+
 ## [0.3.0] - 2026-09-14
 
 ### Added

@@ -287,6 +287,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     if (!Array.isArray(selectedMetrics)) return true
     const hasCustomSelection = selectedMetrics.some(k => typeof k === 'string' && (k.startsWith(`${cardProvider}::`) || k.startsWith(`${cardId}::`)))
     if (!hasCustomSelection) return true
+    if (selectedMetrics.includes(`${cardProvider}::__none__`) || selectedMetrics.includes(`${cardId}::__none__`)) return false
 
     const exactKey = makeHudMetricKey(cardProvider, groupTitle, windowId)
     if (selectedMetrics.includes(exactKey)) return true
@@ -295,13 +296,19 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     if (cardProvider === 'antigravity') {
       const isWeekly = windowId.toLowerCase().includes('weekly')
       const isGemini = groupTitle.toLowerCase().includes('gemini') || windowId.toLowerCase().includes('gemini')
+      const isClaude = groupTitle.toLowerCase().includes('claude') || groupTitle.toLowerCase().includes('gpt') || windowId.toLowerCase().includes('claude')
       for (const sel of selectedMetrics) {
         if (typeof sel !== 'string' || !sel.startsWith('antigravity::')) continue
+        if (sel.includes('__none__')) return false
         const lower = decodeURIComponent(sel).toLowerCase()
-        if (isGemini && isWeekly && lower.includes('gemini') && lower.includes('weekly')) return true
-        if (isGemini && !isWeekly && lower.includes('gemini') && (lower.includes('5h') || lower.includes('5-hour') || lower.includes('five'))) return true
-        if (!isGemini && isWeekly && (lower.includes('claude') || lower.includes('gpt')) && lower.includes('weekly')) return true
-        if (!isGemini && !isWeekly && (lower.includes('claude') || lower.includes('gpt')) && (lower.includes('5h') || lower.includes('5-hour') || lower.includes('five'))) return true
+        const selWeekly = lower.includes('weekly') || lower.includes('周')
+        const sel5h = lower.includes('5h') || lower.includes('5-hour') || lower.includes('five') || lower.includes('5小时')
+        const selGemini = lower.includes('gemini')
+        const selClaude = lower.includes('claude') || lower.includes('gpt')
+
+        if (isGemini && selGemini && ((isWeekly && selWeekly) || (!isWeekly && sel5h))) return true
+        if (isClaude && selClaude && ((isWeekly && selWeekly) || (!isWeekly && sel5h))) return true
+        if ((isWeekly && selWeekly) || (!isWeekly && sel5h)) return true
       }
     }
 
@@ -368,6 +375,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
         continue
       }
 
+      const cardStartIndex = list.length
       for (const group of card.groups) {
         for (const window of group.windows) {
           const key = makeHudMetricKey(card.provider, group.title, window.id)
@@ -384,6 +392,26 @@ export function mountQuotaHud(controller: QuotaController): () => void {
             remainingPercent: Math.max(0, Math.min(100, Math.round(window.remainingPercent))),
             balanceText: isBalance ? `${sym}${Number(card.balance!.remaining).toFixed(1)}` : undefined,
           })
+        }
+      }
+
+      // If card was selected for HUD, not explicitly muted with __none__, but zero metrics matched (e.g. key drift), fallback to include all card windows
+      const hasExplicitNone = Array.isArray(selectedMetrics) && selectedMetrics.some(k => k === `${card.provider}::__none__` || k === `${card.id}::__none__`)
+      if (list.length === cardStartIndex && !hasExplicitNone && card.groups.length > 0) {
+        for (const group of card.groups) {
+          for (const window of group.windows) {
+            const key = makeHudMetricKey(card.provider, group.title, window.id)
+            const isBalance = card.balance?.remaining !== undefined && (card.provider === 'deepseek' || window.barType === 'balance' as any)
+            const sym = card.balance?.currency === 'USD' ? '$' : '¥'
+            list.push({
+              key,
+              provider: card.provider,
+              name: `${card.name} · ${group.title} · ${window.label}`,
+              tag,
+              remainingPercent: Math.max(0, Math.min(100, Math.round(window.remainingPercent))),
+              balanceText: isBalance ? `${sym}${Number(card.balance!.remaining).toFixed(1)}` : undefined,
+            })
+          }
         }
       }
     }

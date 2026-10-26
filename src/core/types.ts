@@ -1,9 +1,9 @@
 /**
  * Data structures for Quota tracking & Single Long Card UI
- * @version 0.3.0
+ * @version 0.3.1
  */
 
-export const PLUGIN_VERSION = '0.3.0'
+export const PLUGIN_VERSION = '0.3.1'
 
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
 
