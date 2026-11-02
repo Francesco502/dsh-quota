@@ -42,7 +42,16 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
         }
         try {
           let body = ''
-          for await (const chunk of req) body += chunk
+          let size = 0
+          for await (const chunk of req) {
+            size += chunk.length
+            if (size > 256 * 1024) {
+              res.writeHead(413, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, message: '请求载荷过大 (超过 256KB)' }))
+              return
+            }
+            body += chunk
+          }
           const payload = JSON.parse(body || '{}')
           const { provider, accountConfig } = payload
           if (!provider) {
@@ -106,7 +115,7 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
       async handler(req: any, res: any) {
         if (req.method === 'GET') {
           try {
-            const cfg = manager.getConfig()
+            const cfg = manager.getSafeConfig()
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(cfg))
           } catch (err: any) {
@@ -122,10 +131,17 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
         }
         try {
           let body = ''
+          let size = 0
           for await (const chunk of req) {
+            size += chunk.length
+            if (size > 256 * 1024) {
+              res.writeHead(413, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: '配置请求过大 (超过 256KB)' }))
+              return
+            }
             body += chunk
           }
-          const parsed = JSON.parse(body)
+          const parsed = JSON.parse(body || '{}')
           manager.saveConfig(parsed)
           void manager.getQuotaCards(true)
           res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -155,7 +171,7 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
               },
             })
             void manager.getQuotaCards(true)
-          }, cfg.httpProxy)
+          }, cfg.httpProxy, cfg.proxyMode)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok: true, authUrl }))
         } catch (err: any) {
@@ -181,7 +197,7 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
               },
             })
             void manager.getQuotaCards(true)
-          }, cfg.httpProxy)
+          }, cfg.httpProxy, cfg.proxyMode)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok: true, authUrl }))
         } catch (err: any) {

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
+### Added
+- **Antigravity Gemini 4 Argon 独立周配额池支持**：
+  - 适配 Google Cloud Code `retrieveUserQuotaSummary` 新版服务端识别机制，采用标准 Hub Client 身份（`antigravity/hub/2.26.0`）发送查询；
+  - 自动识别并独立归类 **Gemini 4 Argon** 专属额度池（`Weekly Limit (Argon)`），不再与普通 Gemini Flash/Pro 混桶去重；
+  - 细分 poolType（`gemini` / `argon` / `claude_gpt` / `general`），单池额度耗尽不影响其余池的模型可用性判断。
+- **Codex 双窗口限额完整展示**：
+  - 同时解析并独立展示 `primary_window` (5-Hour Limit) 与 `secondary_window` (Weekly Limit) 以及 Code Review 额度；
+  - 优化持续时间与重置倒计时判断。
+- **网络请求安全模式 (ProxyMode)**：
+  - 增加 `direct` / `proxy-required` / `proxy-preferred` 模式，在 `proxy-required` 下严格实行 fail-closed（不回退直连、不暴露直连源 IP）；
+  - 代理 URL 凭据自动脱敏，防止密码进入错误日志或 UI。
+- **配置与数据流安全强化**：
+  - `GET /api/dsh-quota/config` 自动脱敏并掩码 API Key、Token，防止敏感凭据回传；
+  - 增加保存时的未脱敏凭据还原，防止 `***` 意外覆盖有效密钥；
+  - 请求载荷增加 256KB 硬上限防护。
+- **逐窗口时序历史记录与重置识别**：
+  - 时序历史升级为窗口级别记录（`instanceId::poolId::windowId`），防止跨组混淆；
+  - 消耗速度计算（Burn Rate）增加重置与充值识别，重置周期跨越时不产生错误消耗激增。
+
+### Fixed
+- **修复 Antigravity 多账号 Token 刷新污染默认账号配置缺陷**：更新特定账号令牌时严格按 `accountConfig` 作用域写回，不再污染默认全局配置。
+- **修复 Codex 配置 OAuth 刷新后未持久化轮换 Token 缺陷**：显式账号与全局配置均能正确持久化新令牌。
+- **解决客户端全局超时重挂与生命周期泄漏**：移除无宿主防护的 `setTimeout apply({})`，增加 `isDestroyed` 与 `AbortController` 守卫，确保插件销毁后定时器与监听器完全回收。
+- **修复 Claude 自定义 BaseURL 跨源重定向泄漏敏感头隐患**：对 API 验证请求添加 `redirect: 'error'` 严格防御。
+- **修复 DeepSeek 余额金额伪造为固定百分比问题**：准确区分真实币种与金额，不虚拟映射为 15%/40%/100%。
+
 ## [0.3.1] - 2026-10-26
 
 ### Fixed

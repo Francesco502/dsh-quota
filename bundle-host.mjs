@@ -52,7 +52,7 @@ for (const file of files) {
 
 const clean = stripTypeScriptTypes(combined)
 const header = `import http from 'node:http'\nimport net from 'node:net'\nimport { randomBytes, createHash } from 'node:crypto'\nimport { createRequire } from 'node:module'\nimport { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, renameSync, unlinkSync } from 'node:fs'\nimport { join } from 'node:path'\nimport { homedir, platform } from 'node:os'\n`
-const footer = `\nexport { inject, apply, VERSION, PLUGIN_VERSION, QuotaManager, fetchWithProxy, DeepSeekProvider, CursorProvider, CodexProvider, AntigravityProvider, GitHubCopilotProvider, OpenAIBillingProvider, ClaudeProvider, KimiProvider, GLMProvider, MiniMaxProvider, QwenProvider, VolcengineProvider, SiliconFlowProvider, OpenRouterProvider, OpenCodeGoProvider, CustomApiProvider, formatQuotaResetText, getRefreshIntervalSeconds, atomicWriteJsonSync, runWithConcurrency, DEFAULT_PROVIDER_ORDER, PROVIDER_DEFAULT_MODELS }\n`
+const footer = `\nexport { inject, apply, VERSION, PLUGIN_VERSION, QuotaManager, fetchWithProxy, sanitizeProxyUrl, DeepSeekProvider, CursorProvider, CodexProvider, AntigravityProvider, GitHubCopilotProvider, OpenAIBillingProvider, ClaudeProvider, KimiProvider, GLMProvider, MiniMaxProvider, QwenProvider, VolcengineProvider, SiliconFlowProvider, OpenRouterProvider, OpenCodeGoProvider, CustomApiProvider, formatQuotaResetText, getRefreshIntervalSeconds, atomicWriteJsonSync, runWithConcurrency, DEFAULT_PROVIDER_ORDER, PROVIDER_DEFAULT_MODELS }\n`
 
 mkdirSync(join(baseDir, 'lib'), { recursive: true })
 writeFileSync(join(baseDir, 'lib/index.js'), header + clean + footer, 'utf8')

@@ -60,14 +60,18 @@ export class QuotaController {
   private notifiedAlarmIds = new Set<string>()
   private onVisibilityChangeHandler?: () => void
   private onWindowFocusHandler?: () => void
+  private isDestroyed = false
 
   constructor(api: QuotaClientApi) {
     this.api = api
   }
 
   async init(): Promise<void> {
+    if (this.isDestroyed) return
     await this.loadConfig()
+    if (this.isDestroyed) return
     await this.refresh(false)
+    if (this.isDestroyed) return
     this.startPolling()
     this.setupWindowListeners()
   }
@@ -77,11 +81,16 @@ export class QuotaController {
   }
 
   startPolling(): void {
+    if (this.isDestroyed) return
     this.stopPolling()
     const intervalSec = this.getRefreshIntervalSec()
     const intervalMs = Math.max(5 * 1000, intervalSec * 1000)
 
     this.pollingTimer = setInterval(() => {
+      if (this.isDestroyed) {
+        this.stopPolling()
+        return
+      }
       if (!this.loading) {
         void this.refresh(false, true)
       }
@@ -96,10 +105,12 @@ export class QuotaController {
   }
 
   private setupWindowListeners(): void {
+    if (this.isDestroyed) return
     if (typeof document === 'undefined' || typeof window === 'undefined') return
     if (this.onVisibilityChangeHandler) return
 
     this.onVisibilityChangeHandler = () => {
+      if (this.isDestroyed) return
       if (document.visibilityState === 'visible') {
         const intervalSec = this.getRefreshIntervalSec()
         const staleThresholdMs = Math.min(60 * 1000, intervalSec * 1000)
@@ -110,6 +121,7 @@ export class QuotaController {
     }
 
     this.onWindowFocusHandler = () => {
+      if (this.isDestroyed) return
       const intervalSec = this.getRefreshIntervalSec()
       const staleThresholdMs = Math.min(60 * 1000, intervalSec * 1000)
       if (Date.now() - this.lastUpdated >= staleThresholdMs) {
@@ -122,6 +134,7 @@ export class QuotaController {
   }
 
   private triggerDesktopNotification(alarms: QuotaAlarm[]): void {
+    if (this.isDestroyed) return
     if (typeof window === 'undefined' || !('Notification' in window)) return
     if (this.config?.enableNotification === false) return
 
@@ -150,6 +163,7 @@ export class QuotaController {
   }
 
   destroy(): void {
+    this.isDestroyed = true
     this.stopPolling()
     if (typeof document !== 'undefined' && this.onVisibilityChangeHandler) {
       document.removeEventListener('visibilitychange', this.onVisibilityChangeHandler)

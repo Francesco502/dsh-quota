@@ -1,4 +1,5 @@
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
+export type ProxyMode = 'direct' | 'proxy-required' | 'proxy-preferred'
 
 export interface MetricWindow {
   id: string
@@ -7,7 +8,12 @@ export interface MetricWindow {
   usedPercent: number
   remainingPercent: number
   resetAt?: string
-  barType?: 'circle' | 'line'
+  barType?: 'circle' | 'line' | 'balance'
+  status?: 'active' | 'disabled' | 'unknown' | 'exhausted'
+  rawFraction?: number
+  windowKind?: '5h' | 'weekly' | 'monthly' | 'sliding' | 'unknown'
+  bucketId?: string
+  modelFamily?: string
 }
 
 export function makeHudMetricKey(provider: string, groupTitle: string, windowId: string): string {
@@ -15,8 +21,10 @@ export function makeHudMetricKey(provider: string, groupTitle: string, windowId:
 }
 
 export interface MetricGroup {
+  id?: string
   title: string
   hasInfoIcon?: boolean
+  poolType?: 'gemini' | 'argon' | 'claude_gpt' | 'custom' | 'general'
   windows: MetricWindow[]
 }
 
@@ -28,11 +36,20 @@ export interface QuotaBalanceInfo {
   grantedBalance?: number
   toppedUpBalance?: number
   expireTime?: string
+  isEstimate?: boolean
 }
 
 export interface QuotaSparklinePoint {
   t: number
   r: number
+}
+
+export interface SourceProvenance {
+  endpoint?: string
+  method?: 'official-summary' | 'model-fallback' | 'local-state' | 'oauth-api' | 'user-balance'
+  timestamp: number
+  partial?: boolean
+  host?: string
 }
 
 export interface AuthCardItem {
@@ -50,12 +67,16 @@ export interface AuthCardItem {
   estimatedHoursLeft?: number
   sparkline?: QuotaSparklinePoint[]
   lastUpdated: number
+  stale?: boolean
+  sourceProvenance?: SourceProvenance
 }
 
 export interface QuotaAlarm {
   instanceId: string
   provider: string
   name: string
+  poolId?: string
+  windowId?: string
   level: 'warn' | 'critical'
   message: string
   timestamp: number
@@ -73,9 +94,13 @@ export interface TestConnectionResult {
 export interface QuotaHistoryPoint {
   timestamp: number
   instanceId: string
+  poolId?: string
+  windowId?: string
+  windowKind?: string
   remainingPercent: number
   usedPercent: number
   remainingBalance?: number
+  resetAt?: string
 }
 
 export interface AccountConfigItem {
@@ -101,7 +126,9 @@ export interface CustomCompatibleEndpoint {
 }
 
 export interface QuotaConfig {
+  schemaVersion?: number
   httpProxy?: string
+  proxyMode?: ProxyMode
   enabledProviders?: string[]
   floatingHudProviders?: string[]
   providerOrder?: string[]

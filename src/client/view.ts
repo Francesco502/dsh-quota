@@ -380,6 +380,11 @@ function sanitizeConfigForExport(cfg: QuotaConfig): QuotaConfig {
       ...item,
       apiKey: item.apiKey ? '***' : undefined,
       sessionToken: item.sessionToken ? '***' : undefined,
+      oauth: item.oauth ? {
+        ...item.oauth,
+        accessToken: item.oauth.accessToken ? '***' : undefined,
+        refreshToken: item.oauth.refreshToken ? '***' : undefined,
+      } : undefined,
     }))
   }
   return copy

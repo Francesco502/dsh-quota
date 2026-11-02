@@ -27,12 +27,17 @@ export class QuotaAlarmDetector {
       // Check min remaining percentage across groups & windows
       let lowestRemaining = 100
       let lowestLabel = ''
+      let lowestPoolId: string | undefined
+      let lowestWinId: string | undefined
 
       for (const group of card.groups) {
         for (const win of group.windows) {
+          if (win.status === 'disabled' || win.status === 'unknown') continue
           if (win.remainingPercent < lowestRemaining) {
             lowestRemaining = win.remainingPercent
             lowestLabel = `${group.title} · ${win.label}`
+            lowestPoolId = group.id || group.poolType
+            lowestWinId = win.id
           }
         }
       }
@@ -42,6 +47,8 @@ export class QuotaAlarmDetector {
         if (balPercent < lowestRemaining) {
           lowestRemaining = balPercent
           lowestLabel = '账户可用余额'
+          lowestPoolId = 'balance'
+          lowestWinId = 'account-balance'
         }
       }
 
@@ -51,6 +58,8 @@ export class QuotaAlarmDetector {
           instanceId: card.id,
           provider: card.provider,
           name: card.name,
+          poolId: lowestPoolId,
+          windowId: lowestWinId,
           level: isCritical ? 'critical' : 'warn',
           message: `${card.name}: ${lowestLabel} 剩余 ${Math.round(lowestRemaining)}%${isCritical ? ' (即将用尽)' : ' (低于阈值)'}`,
           timestamp: now,

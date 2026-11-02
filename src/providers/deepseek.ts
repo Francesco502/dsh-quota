@@ -42,7 +42,7 @@ export class DeepSeekProvider implements IQuotaProvider {
           Authorization: `Bearer ${apiKey}`,
           Accept: 'application/json',
         },
-      }, config.httpProxy, 10000)
+      }, config.httpProxy, 10000, config.proxyMode)
 
       const latencyMs = Date.now() - start
       if (!res.ok) {
@@ -115,7 +115,7 @@ export class DeepSeekProvider implements IQuotaProvider {
           Authorization: `Bearer ${apiKey}`,
           Accept: 'application/json',
         },
-      }, config.httpProxy, 15000)
+      }, config.httpProxy, 15000, config.proxyMode)
 
       if (!res.ok) {
         throw new Error(`API 错误 (${res.status})`)
@@ -128,10 +128,12 @@ export class DeepSeekProvider implements IQuotaProvider {
       const totalBalance = typeof info?.total_balance === 'string' ? parseFloat(info.total_balance) : (info?.total_balance ?? 0)
       const grantedBalance = typeof info?.granted_balance === 'string' ? parseFloat(info.granted_balance) : (info?.granted_balance ?? 0)
       const toppedUpBalance = typeof info?.topped_up_balance === 'string' ? parseFloat(info.topped_up_balance) : (info?.topped_up_balance ?? 0)
+      const currency = (info?.currency || 'CNY').toUpperCase() as 'CNY' | 'USD'
 
-      // Balance metric display
       const totalAmount = Math.max(0, totalBalance)
-      const remPercent = totalAmount > 0 ? (totalAmount < 5 ? 15 : totalAmount < 20 ? 40 : 100) : 0
+      const isLow = totalAmount <= 5
+      const status = !isAvailable || totalAmount <= 0 ? 'error' : (isLow ? 'warn' : 'ok')
+      const remPercent = totalAmount <= 0 ? 0 : (totalAmount < 5 ? 15 : (totalAmount < 20 ? 40 : 100))
       const usedPercent = 100 - remPercent
 
       const subtitle = `总额: ¥${totalAmount.toFixed(2)} (充值 ¥${toppedUpBalance.toFixed(2)} + 赠送 ¥${grantedBalance.toFixed(2)})`
@@ -142,11 +144,11 @@ export class DeepSeekProvider implements IQuotaProvider {
           name: cardName,
           provider: 'deepseek',
           category: this.category,
-          status: !isAvailable || totalAmount <= 0 ? 'error' : (totalAmount < 5 ? 'warn' : 'ok'),
-          plan: 'DeepSeek',
-          account: `¥${totalAmount.toFixed(2)} CNY`,
+          status,
+          plan: 'DeepSeek 官方平台',
+          account: `¥${totalAmount.toFixed(2)} ${currency}`,
           balance: {
-            currency: 'CNY',
+            currency,
             total: totalAmount,
             remaining: totalAmount,
             grantedBalance,
@@ -154,7 +156,10 @@ export class DeepSeekProvider implements IQuotaProvider {
           },
           groups: [
             {
+              id: 'deepseek-balance-group',
               title: '账户余额',
+              hasInfoIcon: true,
+              poolType: 'general',
               windows: [
                 {
                   id: 'deepseek-balance',
@@ -162,12 +167,19 @@ export class DeepSeekProvider implements IQuotaProvider {
                   subtitle: `充值: ¥${toppedUpBalance.toFixed(2)} · 赠送: ¥${grantedBalance.toFixed(2)}`,
                   usedPercent,
                   remainingPercent: remPercent,
-                  barType: 'balance' as any,
+                  barType: 'balance',
+                  status: totalAmount <= 0 ? 'exhausted' : 'active',
                 },
               ],
             },
           ],
           lastUpdated: Date.now(),
+          sourceProvenance: {
+            endpoint: url,
+            method: 'user-balance',
+            timestamp: Date.now(),
+            host: 'api.deepseek.com',
+          },
         },
       }
     } catch (err: any) {

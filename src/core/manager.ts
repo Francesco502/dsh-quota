@@ -60,9 +60,9 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, { primaryId: string; availa
     role: '海外顶尖全模型智能聚合路由',
   },
   antigravity: {
-    primaryId: 'gemini-2.0-flash',
-    available: ['gemini-2.0-flash', 'claude-3-5-sonnet', 'gemini-2.0-pro-exp'],
-    role: '超长上下文与快速代码重构',
+    primaryId: 'gemini-3.8-flash',
+    available: ['gemini-3.8-flash', 'gemini-3.1-pro', 'gemini-4-argon', 'claude-sonnet-5-5', 'claude-opus-5-5'],
+    role: '超长上下文、快速响应与高阶多模态分析',
   },
   cursor: {
     primaryId: 'claude-3.5-sonnet',
@@ -70,9 +70,9 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, { primaryId: string; availa
     role: 'IDE 本地编程补全与编辑',
   },
   codex: {
-    primaryId: 'gpt-4o',
-    available: ['gpt-4o', 'o1', 'o3-mini'],
-    role: '深度复杂推理与多轮问答',
+    primaryId: 'gpt-6.1-sol',
+    available: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.1-terra', 'gpt-6-luna'],
+    role: '深度复杂推理、代码架构与多轮长任务',
   },
   github_copilot: {
     primaryId: 'gpt-4o',
@@ -85,9 +85,9 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, { primaryId: string; availa
     role: 'OpenAI 官方 API 全量能力',
   },
   claude: {
-    primaryId: 'claude-3-5-sonnet-20241022',
-    available: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
-    role: '高精度代码架构与逻辑推理',
+    primaryId: 'claude-sonnet-5-5',
+    available: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-3-5-sonnet'],
+    role: '高精度代码架构、深度逻辑推理与工程交付',
   },
   kimi: {
     primaryId: 'moonshot-v1-auto',
@@ -162,6 +162,29 @@ export async function runWithConcurrency<T, R>(
 interface CacheEntry {
   card: AuthCardItem
   fetchedAt: number
+}
+
+function maskSecret(val?: string): string {
+  if (!val) return ''
+  const trimmed = String(val).trim()
+  if (trimmed.length <= 8) return '••••••••'
+  return `${trimmed.slice(0, 4)}••••${trimmed.slice(-4)}`
+}
+
+function restoreMaskedSecrets(incoming: any, existing: any): any {
+  if (!incoming || typeof incoming !== 'object') return incoming
+  if (!existing || typeof existing !== 'object') return incoming
+  const res = Array.isArray(incoming) ? [...incoming] : { ...incoming }
+  for (const k of Object.keys(res)) {
+    if (typeof res[k] === 'string' && (res[k] === '***' || res[k] === '••••••••' || res[k].includes('••••'))) {
+      if (existing[k] !== undefined) {
+        res[k] = existing[k]
+      }
+    } else if (typeof res[k] === 'object' && res[k] !== null) {
+      res[k] = restoreMaskedSecrets(res[k], existing[k])
+    }
+  }
+  return res
 }
 
 export class QuotaManager {
@@ -272,33 +295,36 @@ export class QuotaManager {
 
   saveConfig(newConfig: QuotaConfig): void {
     const current = this.config || {}
+    const unmasked = restoreMaskedSecrets(newConfig, current)
     const merged: QuotaConfig = {
       ...current,
-      ...newConfig,
-      deepseek: { ...current.deepseek, ...newConfig.deepseek },
-      cursor: { ...current.cursor, ...newConfig.cursor },
-      codex: { ...current.codex, ...newConfig.codex },
-      antigravity: { ...current.antigravity, ...newConfig.antigravity },
-      github_copilot: { ...current.github_copilot, ...newConfig.github_copilot },
-      openai_billing: { ...current.openai_billing, ...newConfig.openai_billing },
-      claude: { ...current.claude, ...newConfig.claude },
-      kimi: { ...current.kimi, ...newConfig.kimi },
-      glm: { ...current.glm, ...newConfig.glm },
-      minimax: { ...current.minimax, ...newConfig.minimax },
-      qwen: { ...current.qwen, ...newConfig.qwen },
-      volcengine: { ...current.volcengine, ...newConfig.volcengine },
-      siliconflow: { ...current.siliconflow, ...newConfig.siliconflow },
-      openrouter: { ...current.openrouter, ...newConfig.openrouter },
-      opencode_go: { ...current.opencode_go, ...newConfig.opencode_go },
-      custom_compatible: newConfig.custom_compatible !== undefined ? newConfig.custom_compatible : current.custom_compatible,
-      accounts: newConfig.accounts !== undefined ? newConfig.accounts : current.accounts,
-      enabledProviders: newConfig.enabledProviders !== undefined ? newConfig.enabledProviders : current.enabledProviders,
-      floatingHudProviders: newConfig.floatingHudProviders !== undefined ? newConfig.floatingHudProviders : current.floatingHudProviders,
-      floatingHudMetrics: newConfig.floatingHudMetrics !== undefined ? newConfig.floatingHudMetrics : current.floatingHudMetrics,
-      providerOrder: newConfig.providerOrder !== undefined ? newConfig.providerOrder : current.providerOrder,
+      ...unmasked,
+      proxyMode: unmasked.proxyMode !== undefined ? unmasked.proxyMode : current.proxyMode,
+      httpProxy: unmasked.httpProxy !== undefined ? unmasked.httpProxy : current.httpProxy,
+      deepseek: { ...current.deepseek, ...unmasked.deepseek },
+      cursor: { ...current.cursor, ...unmasked.cursor },
+      codex: { ...current.codex, ...unmasked.codex },
+      antigravity: { ...current.antigravity, ...unmasked.antigravity },
+      github_copilot: { ...current.github_copilot, ...unmasked.github_copilot },
+      openai_billing: { ...current.openai_billing, ...unmasked.openai_billing },
+      claude: { ...current.claude, ...unmasked.claude },
+      kimi: { ...current.kimi, ...unmasked.kimi },
+      glm: { ...current.glm, ...unmasked.glm },
+      minimax: { ...current.minimax, ...unmasked.minimax },
+      qwen: { ...current.qwen, ...unmasked.qwen },
+      volcengine: { ...current.volcengine, ...unmasked.volcengine },
+      siliconflow: { ...current.siliconflow, ...unmasked.siliconflow },
+      openrouter: { ...current.openrouter, ...unmasked.openrouter },
+      opencode_go: { ...current.opencode_go, ...unmasked.opencode_go },
+      custom_compatible: unmasked.custom_compatible !== undefined ? unmasked.custom_compatible : current.custom_compatible,
+      accounts: unmasked.accounts !== undefined ? unmasked.accounts : current.accounts,
+      enabledProviders: unmasked.enabledProviders !== undefined ? unmasked.enabledProviders : current.enabledProviders,
+      floatingHudProviders: unmasked.floatingHudProviders !== undefined ? unmasked.floatingHudProviders : current.floatingHudProviders,
+      floatingHudMetrics: unmasked.floatingHudMetrics !== undefined ? unmasked.floatingHudMetrics : current.floatingHudMetrics,
+      providerOrder: unmasked.providerOrder !== undefined ? unmasked.providerOrder : current.providerOrder,
       customNames: (() => {
-        if (newConfig.customNames === undefined) return current.customNames
-        const combined = { ...(current.customNames || {}), ...newConfig.customNames }
+        if (unmasked.customNames === undefined) return current.customNames
+        const combined = { ...(current.customNames || {}), ...unmasked.customNames }
         for (const [k, v] of Object.entries(combined)) {
           if (!v || !v.trim()) delete (combined as any)[k]
         }
@@ -308,9 +334,40 @@ export class QuotaManager {
 
     this.config = merged
     this.cardCache.clear()
-    try {
-      atomicWriteJsonSync(this.configPath, this.config, 0o600)
-    } catch {}
+    atomicWriteJsonSync(this.configPath, this.config, 0o600)
+  }
+
+  getSafeConfig(): QuotaConfig {
+    const copy: any = JSON.parse(JSON.stringify(this.config || {}))
+    const keyProps = ['apiKey', 'sessionToken', 'token']
+    for (const [k, v] of Object.entries(copy)) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        for (const kp of keyProps) {
+          if ((v as any)[kp]) (v as any)[kp] = maskSecret((v as any)[kp])
+        }
+        if ((v as any).oauth?.accessToken) (v as any).oauth.accessToken = maskSecret((v as any).oauth.accessToken)
+        if ((v as any).oauth?.refreshToken) (v as any).oauth.refreshToken = maskSecret((v as any).oauth.refreshToken)
+      }
+    }
+    if (Array.isArray(copy.custom_compatible)) {
+      copy.custom_compatible = copy.custom_compatible.map((item: any) => ({
+        ...item,
+        apiKey: item.apiKey ? maskSecret(item.apiKey) : '',
+      }))
+    }
+    if (Array.isArray(copy.accounts)) {
+      copy.accounts = copy.accounts.map((item: any) => ({
+        ...item,
+        apiKey: item.apiKey ? maskSecret(item.apiKey) : undefined,
+        sessionToken: item.sessionToken ? maskSecret(item.sessionToken) : undefined,
+        oauth: item.oauth ? {
+          ...item.oauth,
+          accessToken: item.oauth.accessToken ? maskSecret(item.oauth.accessToken) : undefined,
+          refreshToken: item.oauth.refreshToken ? maskSecret(item.oauth.refreshToken) : undefined,
+        } : undefined,
+      }))
+    }
+    return copy
   }
 
   getConfig(): QuotaConfig {

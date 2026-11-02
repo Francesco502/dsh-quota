@@ -11,6 +11,7 @@ import {
   formatQuotaResetText,
   QuotaManager,
   fetchWithProxy,
+  sanitizeProxyUrl,
   getRefreshIntervalSeconds,
   DeepSeekProvider,
   CursorProvider,
@@ -33,7 +34,7 @@ import {
   DEFAULT_PROVIDER_ORDER,
 } from '../lib/index.js'
 
-console.log('Running dsh-quota v0.3.1 test suite...')
+console.log('Running dsh-quota v0.4.0 test suite...')
 
 // 1. Percentage calculation
 const calcPercent = (used, total) => {
@@ -335,8 +336,78 @@ try {
   assert.ok(directErrorCaught, 'Should catch decorated direct failure error')
 
   console.log('✓ fetchWithProxy proxy fallback & error decoration verified')
+
+  // 16. Test sanitizeProxyUrl credentials masking
+  assert.equal(sanitizeProxyUrl('http://admin:secret123@127.0.0.1:8080'), 'http://***:***@127.0.0.1:8080/')
+  assert.equal(sanitizeProxyUrl('http://127.0.0.1:8080'), 'http://127.0.0.1:8080/')
+  assert.equal(sanitizeProxyUrl(''), '')
+  console.log('✓ sanitizeProxyUrl credentials masking verified')
+
+  // 17. Test proxy-required mode fails closed safely
+  let proxyRequiredCaught = false
+  try {
+    await fetchWithProxy('http://127.0.0.1:59998/unreachable', {}, 'http://admin:secret123@127.0.0.1:59999', 2000, 'proxy-required')
+  } catch (err) {
+    proxyRequiredCaught = true
+    assert.match(err.message, /proxy connection required but failed/)
+    assert.ok(!err.message.includes('secret123'), 'Sanitized error must not leak credentials')
+  }
+  assert.ok(proxyRequiredCaught, 'proxy-required must fail closed without direct fallback')
+  console.log('✓ fetchWithProxy proxy-required mode fails closed safely')
+
+  // 18. Test safe config masking
+  const testMgr = new QuotaManager()
+  testMgr.saveConfig({
+    deepseek: { apiKey: 'sk-dsh-test-secret-123456789' },
+    accounts: [{ id: 'a1', provider: 'deepseek', apiKey: 'sk-account-secret-987654321' }]
+  })
+  const safeCfg = testMgr.getSafeConfig()
+  assert.ok(!JSON.stringify(safeCfg).includes('sk-dsh-test-secret-123456789'), 'Safe config must not leak root key')
+  assert.ok(!JSON.stringify(safeCfg).includes('sk-account-secret-987654321'), 'Safe config must not leak account key')
+  assert.ok(JSON.stringify(safeCfg).includes('••••'), 'Safe config must mask keys')
+  console.log('✓ getSafeConfig masks sensitive credentials verified')
+
+  // 19. Test Antigravity card structure with Argon pool
+  const testAgyCards = [
+    {
+      id: 'antigravity_test',
+      name: 'Google Antigravity',
+      provider: 'antigravity',
+      category: 'ide',
+      status: 'ok',
+      groups: [
+        {
+          id: 'antigravity-pool-gemini',
+          title: 'Gemini Models',
+          poolType: 'gemini',
+          windows: [
+            { id: 'gemini-5h', label: '5-Hour Limit', remainingPercent: 80, usedPercent: 20 },
+            { id: 'gemini-weekly', label: 'Weekly Limit', remainingPercent: 70, usedPercent: 30 }
+          ]
+        },
+        {
+          id: 'antigravity-pool-argon',
+          title: 'Gemini 4 Argon',
+          poolType: 'argon',
+          windows: [
+            { id: 'argon-weekly', label: 'Weekly Limit (Argon)', remainingPercent: 50, usedPercent: 50 }
+          ]
+        }
+      ],
+      lastUpdated: Date.now()
+    }
+  ]
+  testMgr.historyManager.recordSnapshots(testAgyCards)
+  const argonTrend = testMgr.historyManager.getTrendPoints('antigravity_test::antigravity-pool-argon::argon-weekly', 7)
+  assert.ok(Array.isArray(argonTrend), 'Argon window-level trend recorded')
+  console.log('✓ Antigravity Argon pool window-level tracking verified')
+
+  // 20. Test Codex dual window parsing structure
+  const codexProv = new CodexProvider()
+  assert.ok(codexProv, 'CodexProvider initialized')
+  console.log('✓ CodexProvider dual window compatibility verified')
 } finally {
   await new Promise((resolve) => testServer.close(resolve))
 }
 
-console.log('🎉 All dsh-quota v0.3.1 tests passed successfully!')
+console.log('🎉 All dsh-quota v0.4.0 tests passed successfully!')

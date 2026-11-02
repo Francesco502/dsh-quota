@@ -100,7 +100,9 @@ export class CodexProvider implements IQuotaProvider {
 
   private async refreshAccessToken(
     creds: LoadedCodexAuth,
-    proxyUrl?: string
+    proxyUrl?: string,
+    config?: QuotaConfig,
+    accountConfig?: AccountConfigItem
   ): Promise<string | null> {
     if (!creds.refreshToken) return null
     try {
@@ -117,7 +119,7 @@ export class CodexProvider implements IQuotaProvider {
           client_id: clientId,
           refresh_token: creds.refreshToken,
         }),
-      }, proxyUrl, 12000)
+      }, proxyUrl, 12000, config?.proxyMode)
 
       if (!tokenRes.ok) return null
       const data = await tokenRes.json() as any
@@ -127,6 +129,15 @@ export class CodexProvider implements IQuotaProvider {
 
       creds.accessToken = newAccessToken
       creds.refreshToken = newRefreshToken
+
+      // Update in memory config without polluting default config
+      if (accountConfig?.oauth) {
+        accountConfig.oauth.accessToken = newAccessToken
+        accountConfig.oauth.refreshToken = newRefreshToken
+      } else if (config?.codex?.oauth) {
+        config.codex.oauth.accessToken = newAccessToken
+        config.codex.oauth.refreshToken = newRefreshToken
+      }
 
       if (creds.filePath && existsSync(creds.filePath)) {
         try {
@@ -164,24 +175,25 @@ export class CodexProvider implements IQuotaProvider {
       }
       if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
 
-      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000)
+      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000, config.proxyMode)
       if (res.status === 401 && creds.refreshToken) {
-        const refreshed = await this.refreshAccessToken(creds, config.httpProxy)
+        const refreshed = await this.refreshAccessToken(creds, config.httpProxy, config, accountConfig)
         if (refreshed) {
           headers.Authorization = `Bearer ${refreshed}`
-          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000)
+          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000, config.proxyMode)
         }
       }
       const latencyMs = Date.now() - start
 
       if (res.ok) {
         const data = await res.json() as any
+        const plan = (data.plan_type ?? 'Codex').toUpperCase()
         return {
           ok: true,
           provider: 'codex',
           latencyMs,
-          account: data.email || 'ChatGPT Account',
-          message: `连接成功 (延迟: ${latencyMs}ms)`,
+          account: `${data.email || creds.source} (${plan})`,
+          message: `连接成功 (延迟: ${latencyMs}ms, 方案: ${plan})`,
         }
       }
 
@@ -203,7 +215,7 @@ export class CodexProvider implements IQuotaProvider {
 
   async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'codex'
-    const cardName = accountConfig?.name || 'Codex (OpenAI)'
+    const cardName = accountConfig?.name || config.customNames?.codex || config.codex?.name || 'Codex (OpenAI)'
     const creds = this.loadAuth(config, accountConfig)
 
     if (!creds) {
@@ -229,12 +241,12 @@ export class CodexProvider implements IQuotaProvider {
       }
       if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
 
-      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000)
+      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000, config.proxyMode)
       if (res.status === 401 && creds.refreshToken) {
-        const refreshed = await this.refreshAccessToken(creds, config.httpProxy)
+        const refreshed = await this.refreshAccessToken(creds, config.httpProxy, config, accountConfig)
         if (refreshed) {
           headers.Authorization = `Bearer ${refreshed}`
-          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000)
+          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000, config.proxyMode)
         }
       }
       if (!res.ok) {
@@ -248,10 +260,47 @@ export class CodexProvider implements IQuotaProvider {
       const plan = (data.plan_type ?? 'Codex').toUpperCase()
 
       const rateLimit = data.rate_limit || {}
-      const window = rateLimit.secondary_window || rateLimit.primary_window
-      const usedPercent = Math.max(0, Math.min(100, Math.round(window?.used_percent ?? 0)))
-      const remainingPercent = Math.max(0, 100 - usedPercent)
-      const resetAt = window?.reset_at ? new Date(window.reset_at * 1000).toISOString() : undefined
+      const windows: MetricWindow[] = []
+
+      const buildWindow = (win: UsageWindow | undefined, winId: string, defaultLabel: string, isWeeklyFallback = false): MetricWindow | null => {
+        if (!win) return null
+        const used = Math.max(0, Math.min(100, Math.round(win.used_percent ?? 0)))
+        const rem = Math.max(0, 100 - used)
+        const resetAt = win.reset_at ? new Date(win.reset_at * 1000).toISOString() : undefined
+        const isWeekly = win.limit_window_seconds ? win.limit_window_seconds >= 86400 * 3 : isWeeklyFallback
+        const label = isWeekly ? 'Weekly Limit' : (win.limit_window_seconds && win.limit_window_seconds <= 18000 ? '5-Hour Limit' : defaultLabel)
+        const subtitle = formatQuotaResetText(resetAt, used, isWeekly)
+        return {
+          id: winId,
+          label,
+          subtitle,
+          usedPercent: used,
+          remainingPercent: rem,
+          resetAt,
+          barType: 'circle',
+          windowKind: isWeekly ? 'weekly' : '5h',
+          rawFraction: win.used_percent !== undefined ? (100 - win.used_percent) / 100 : undefined,
+          status: rem <= 0 ? 'exhausted' : 'active',
+        }
+      }
+
+      const primWin = buildWindow(rateLimit.primary_window, 'codex-5h', '5-Hour Limit', false)
+      const secWin = buildWindow(rateLimit.secondary_window, 'codex-weekly', 'Weekly Limit', true)
+      if (primWin) windows.push(primWin)
+      if (secWin) windows.push(secWin)
+
+      if (windows.length === 0) {
+        const fallback = buildWindow(rateLimit.secondary_window || rateLimit.primary_window, 'codex-weekly', 'Weekly Limit', true)
+        if (fallback) windows.push(fallback)
+      }
+
+      if (data.code_review_rate_limit?.primary_window) {
+        const crWin = buildWindow(data.code_review_rate_limit.primary_window, 'codex-review', 'Code Review Limit', false)
+        if (crWin) windows.push(crWin)
+      }
+
+      const lowestRem = windows.length > 0 ? Math.min(...windows.map(w => w.remainingPercent)) : 100
+      const cardStatus = windows.length === 0 ? 'ok' : (lowestRem <= 0 ? 'error' : (lowestRem <= (config.alarmThresholdPercent ?? 15) ? 'warn' : 'ok'))
 
       return {
         card: {
@@ -259,27 +308,25 @@ export class CodexProvider implements IQuotaProvider {
           name: cardName,
           provider: 'codex',
           category: this.category,
-          status: remainingPercent <= 10 ? 'warn' : 'ok',
+          status: cardStatus,
           plan,
           account: data.email || creds.source,
           groups: [
             {
+              id: 'codex-rate-limits',
               title: 'Codex 额度',
               hasInfoIcon: true,
-              windows: [
-                {
-                  id: 'codex-weekly',
-                  label: 'Weekly Limit',
-                  subtitle: formatQuotaResetText(resetAt, usedPercent, true),
-                  usedPercent,
-                  remainingPercent,
-                  resetAt,
-                  barType: 'circle',
-                },
-              ],
+              poolType: 'claude_gpt',
+              windows,
             },
           ],
           lastUpdated: Date.now(),
+          sourceProvenance: {
+            endpoint: 'https://chatgpt.com/backend-api/wham/usage',
+            method: 'oauth-api',
+            timestamp: Date.now(),
+            host: 'chatgpt.com',
+          },
         },
       }
     } catch (err: any) {
