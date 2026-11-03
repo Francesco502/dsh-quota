@@ -208,6 +208,8 @@ interface SecretBundle {
   providers: Record<string, Record<string, unknown>>
   accounts: Record<string, Record<string, unknown>>
   custom: Record<string, Record<string, unknown>>
+  /** Proxy URL, which may embed `user:password@`. */
+  proxy?: string
 }
 
 function emptyBundle(): SecretBundle {
@@ -246,6 +248,11 @@ function splitSecrets(config: QuotaConfig): { publicConfig: QuotaConfig; secrets
     if (Object.keys(found).length > 0) store[bucket] = found
   }
 
+  if (typeof publicConfig.httpProxy === 'string' && publicConfig.httpProxy) {
+    secrets.proxy = publicConfig.httpProxy
+    delete publicConfig.httpProxy
+  }
+
   for (const [name, value] of Object.entries(publicConfig)) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue
     if (name === 'accounts' || name === 'custom_compatible') continue
@@ -264,6 +271,7 @@ function splitSecrets(config: QuotaConfig): { publicConfig: QuotaConfig; secrets
 function mergeSecrets(config: QuotaConfig, secrets: Partial<SecretBundle> | undefined): QuotaConfig {
   if (!secrets || typeof secrets !== 'object') return config
   const target: any = config
+  if (typeof secrets.proxy === 'string' && secrets.proxy && !target.httpProxy) target.httpProxy = secrets.proxy
   const restore = (obj: any, store: Record<string, Record<string, unknown>> | undefined, key: string): void => {
     const found = store?.[key]
     if (!found || !obj) return

@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 时序历史升级为窗口级别记录（`instanceId::poolId::windowId`），防止跨组混淆；
   - 消耗速度计算（Burn Rate）增加重置与充值识别，重置周期跨越时不产生错误消耗激增。
 
+### Added
+- **只读额度探针 `scripts/probe-antigravity.mjs`**：直接打印上游返回的额度分组、bucketId、窗口类型与 plan 字段，用于在真机上确认协议变化（不回显任何密钥，账号邮箱打码）。
+
 ### Changed
 - **本地凭据探测改为显式授权**：首次安装不再默认 `autoDetectLocal: true`，Cursor / Antigravity / Codex / Copilot 的本机登录态只有用户在设置中勾选后才读取。
 - **DeepSeek 余额不再伪装百分比**：看板与告警均以真实金额呈现，颜色按金额分档；告警文案从"剩余 15%"改为"余额 ¥x.xx"。

@@ -481,6 +481,16 @@ try {
   const oauthPublic = readFileSyncTest(join(process.env.DSH_HOME, 'quota-config.json'), 'utf8')
   assert.ok(!oauthPublic.includes('ya29.regression'), 'oauth token must not remain in the readable config')
   console.log('✓ oauth tokens split out and restored on boot')
+
+  // 27. The proxy URL (which can carry user:password) is a secret too
+  const proxyMgr2 = new QuotaManager()
+  proxyMgr2.saveConfig({ httpProxy: 'http://user:proxypass@127.0.0.1:7890' })
+  const proxyPublic = readFileSyncTest(join(process.env.DSH_HOME, 'quota-config.json'), 'utf8')
+  const proxySecrets = readFileSyncTest(join(process.env.DSH_HOME, 'quota-secrets.json'), 'utf8')
+  assert.ok(!proxyPublic.includes('proxypass'), 'proxy credentials must not sit in the readable config')
+  assert.ok(proxySecrets.includes('proxypass'), 'proxy URL must be stored in the secrets file')
+  assert.equal(new QuotaManager().getConfig().httpProxy, 'http://user:proxypass@127.0.0.1:7890', 'proxy URL must reload')
+  console.log('✓ proxy URL stored as a secret and restored')
 } finally {
   await new Promise((resolve) => testServer.close(resolve))
 }
