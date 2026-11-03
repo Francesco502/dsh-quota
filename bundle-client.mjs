@@ -27,29 +27,35 @@ for (const f of files) {
 
 const cleanJs = stripTypeScriptTypes(combined)
 
-const bundle = `const factory = (require) => {
-  var module = { exports: {} };
-  var exports = module.exports;
-  Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+const bundle = `(function () {
+  var factory = (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
+    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 
 ${cleanJs}
 
-  exports.apply = apply;
-  exports.inject = typeof inject !== 'undefined' ? inject : [];
-  exports.VERSION = VERSION;
-  return module.exports;
-};
+    exports.apply = apply;
+    exports.inject = typeof inject !== 'undefined' ? inject : [];
+    exports.VERSION = VERSION;
+    return module.exports;
+  };
 
-if (typeof window !== 'undefined' && window.__ModuleLoader__) {
-  window.__ModuleLoader__.load({
-    id: "@francescoli/dsh-quota",
-    factory: factory
-  });
-  window.__ModuleLoader__.load({
-    id: "dsh-quota",
-    factory: factory
-  });
-}
+  if (typeof window !== 'undefined' && window.__ModuleLoader__) {
+    try {
+      window.__ModuleLoader__.load({
+        id: "@francescoli/dsh-quota",
+        factory: factory
+      });
+    } catch (error) {
+      // The loader rejects a second factory for one id. A re-executed bundle (HMR,
+      // duplicate script tag) must stay inert: rethrowing aborts the page's plugin
+      // sync with "loaded without registering", which is worse than keeping the
+      // factory that is already registered.
+      if (!/duplicate factory registration/.test(String(error && error.message))) throw error;
+    }
+  }
+})();
 `
 
 mkdirSync(join(baseDir, 'lib'), { recursive: true })

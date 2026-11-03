@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **修复升级后插件同步报错 `loaded without registering "@francescoli/dsh-quota"`**：客户端 bundle 原先把 `const factory` 声明在 classic script 顶层，页面在升级后（HMR 或重复 script）再次执行同一 rev 时会以 `Identifier 'factory' has already been declared` 在解析阶段中断，导致 `__ModuleLoader__` 收不到任何注册。现改为 IIFE 包裹、整体注册一个规范 id，并对重复注册保持惰性（不会再中断插件同步）。
+
 ## [0.4.0] - 2026-11-03
 
 ### Added
