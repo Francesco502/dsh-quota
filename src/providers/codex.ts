@@ -105,6 +105,9 @@ export class CodexProvider implements IQuotaProvider {
     accountConfig?: AccountConfigItem
   ): Promise<string | null> {
     if (!creds.refreshToken) return null
+    // A credential read from the user's own CLI login (auth.json) is not ours to rotate:
+    // refreshing it can invalidate their CLI session. Opt in with codex.syncLocalAuth.
+    if (creds.filePath && config?.codex?.syncLocalAuth !== true) return null
     try {
       const clientId = 'app_EMoamEEZ73f0CkXaXp7hrann'
       const tokenRes = await fetchWithProxy('https://auth.openai.com/oauth/token', {
@@ -139,7 +142,7 @@ export class CodexProvider implements IQuotaProvider {
         config.codex.oauth.refreshToken = newRefreshToken
       }
 
-      if (creds.filePath && existsSync(creds.filePath)) {
+      if (creds.filePath && config?.codex?.syncLocalAuth === true && existsSync(creds.filePath)) {
         try {
           const raw = readFileSync(creds.filePath, 'utf8')
           const auth = JSON.parse(raw) as CodexAuth

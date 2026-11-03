@@ -448,6 +448,29 @@ try {
   const leaked = tasks.filter(t => explicitlyDisabled.includes(t.providerName))
   assert.equal(leaked.length, 0, 'explicitly disabled providers must not enter the connectivity sweep')
   console.log('✓ connectivity sweep excludes explicitly disabled providers')
+
+  // 24. Secrets live in their own 0600 file; the readable config stays secret-free
+  const { readFileSync: readFileSyncTest, writeFileSync: writeFileSyncTest } = await import('node:fs')
+  const splitDir = mkdtempSync(join(tmpdir(), 'dsh-quota-split-'))
+  process.env.DSH_HOME = splitDir
+  const splitMgr = new QuotaManager()
+  splitMgr.saveConfig({ deepseek: { apiKey: 'sk-split-secret-abcdef' } })
+  const publicRaw = readFileSyncTest(join(splitDir, 'quota-config.json'), 'utf8')
+  const secretsRaw = readFileSyncTest(join(splitDir, 'quota-secrets.json'), 'utf8')
+  assert.ok(!publicRaw.includes('sk-split-secret-abcdef'), 'quota-config.json must not hold secrets')
+  assert.ok(secretsRaw.includes('sk-split-secret-abcdef'), 'quota-secrets.json must hold the secret')
+  const reloaded = new QuotaManager()
+  assert.equal(reloaded.getConfig().deepseek?.apiKey, 'sk-split-secret-abcdef', 'secrets must reload from the secrets file')
+  console.log('✓ secrets split out of the readable config and reloaded')
+
+  // 25. A corrupt config is quarantined instead of silently overwritten
+  writeFileSyncTest(join(splitDir, 'quota-config.json'), '{ not valid json', 'utf8')
+  const recovered = new QuotaManager()
+  assert.ok(recovered.getConfig().deepseek?.enabled === true, 'corrupt config falls back to defaults')
+  const { readdirSync } = await import('node:fs')
+  const quarantined = readdirSync(splitDir).filter(f => f.includes('.corrupt-'))
+  assert.ok(quarantined.length >= 1, 'corrupt config must be preserved for inspection')
+  console.log('✓ corrupt config quarantined, not overwritten')
 } finally {
   await new Promise((resolve) => testServer.close(resolve))
 }

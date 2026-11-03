@@ -20,7 +20,7 @@ import { OAuthManager } from './oauth.ts'
 import { QuotaHistoryManager } from './history.ts'
 import { QuotaAlarmDetector } from './alarm.ts'
 import { sanitizeProxyUrl } from './fetch.ts'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { atomicWriteJsonSync } from './paths.ts'
@@ -201,6 +201,87 @@ function restoreMaskedSecrets(incoming: any, existing: any): any {
   return res
 }
 
+
+const SECRET_STRING_KEYS = ['apiKey', 'sessionToken', 'token', 'sessionKey'] as const
+
+interface SecretBundle {
+  providers: Record<string, Record<string, unknown>>
+  accounts: Record<string, Record<string, unknown>>
+  custom: Record<string, Record<string, unknown>>
+}
+
+function emptyBundle(): SecretBundle {
+  return { providers: {}, accounts: {}, custom: {} }
+}
+
+/**
+ * Move every secret out of a config copy, returning both halves.
+ *
+ * `quota-config.json` is the file users screenshot, diff and paste into issues;
+ * keeping live keys out of it is worth a second 0600 file next to it.
+ */
+function splitSecrets(config: QuotaConfig): { publicConfig: QuotaConfig; secrets: SecretBundle } {
+  const publicConfig: any = JSON.parse(JSON.stringify(config || {}))
+  const secrets = emptyBundle()
+
+  const takeFrom = (target: any, store: Record<string, Record<string, unknown>>, bucket: string): void => {
+    if (!target || typeof target !== 'object') return
+    const found: Record<string, unknown> = {}
+    for (const key of SECRET_STRING_KEYS) {
+      if (typeof target[key] === 'string' && target[key]) {
+        found[key] = target[key]
+        delete target[key]
+      }
+    }
+    if (target.oauth && typeof target.oauth === 'object') {
+      const oauth: Record<string, unknown> = {}
+      for (const key of ['accessToken', 'refreshToken', 'accountId']) {
+        if (typeof target.oauth[key] === 'string' && target.oauth[key]) {
+          oauth[key] = target.oauth[key]
+          delete target.oauth[key]
+        }
+      }
+      if (Object.keys(oauth).length > 0) found.oauth = oauth
+    }
+    if (Object.keys(found).length > 0) store[bucket] = found
+  }
+
+  for (const [name, value] of Object.entries(publicConfig)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    if (name === 'accounts' || name === 'custom_compatible') continue
+    takeFrom(value, secrets.providers, name)
+  }
+  if (Array.isArray(publicConfig.accounts)) {
+    for (const acc of publicConfig.accounts) takeFrom(acc, secrets.accounts, String(acc?.id ?? ''))
+  }
+  if (Array.isArray(publicConfig.custom_compatible)) {
+    for (const cust of publicConfig.custom_compatible) takeFrom(cust, secrets.custom, String(cust?.id ?? ''))
+  }
+  return { publicConfig, secrets }
+}
+
+/** Put a secret bundle back into a config copy loaded from disk. */
+function mergeSecrets(config: QuotaConfig, secrets: Partial<SecretBundle> | undefined): QuotaConfig {
+  if (!secrets || typeof secrets !== 'object') return config
+  const target: any = config
+  const restore = (obj: any, store: Record<string, Record<string, unknown>> | undefined, key: string): void => {
+    const found = store?.[key]
+    if (!found || !obj) return
+    for (const field of SECRET_STRING_KEYS) {
+      if (typeof found[field] === 'string' && !obj[field]) obj[field] = found[field]
+    }
+    if (found.oauth && typeof found.oauth === 'object' && !obj.oauth) obj.oauth = { ...(found.oauth as object) }
+  }
+  for (const [name, value] of Object.entries(target)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    if (name === 'accounts' || name === 'custom_compatible') continue
+    restore(value, secrets.providers, name)
+  }
+  for (const acc of Array.isArray(target.accounts) ? target.accounts : []) restore(acc, secrets.accounts, String(acc?.id ?? ''))
+  for (const cust of Array.isArray(target.custom_compatible) ? target.custom_compatible : []) restore(cust, secrets.custom, String(cust?.id ?? ''))
+  return target
+}
+
 export class QuotaManager {
   private providers: Map<string, IQuotaProvider> = new Map()
   public oauthManager = new OAuthManager()
@@ -209,6 +290,7 @@ export class QuotaManager {
 
   private cardCache: Map<string, CacheEntry> = new Map()
   private configPath: string
+  private secretsPath: string
   private config: QuotaConfig = {}
 
   constructor() {
@@ -220,7 +302,34 @@ export class QuotaManager {
       } catch {}
     }
     this.configPath = join(dshDir, 'quota-config.json')
+    this.secretsPath = join(dshDir, 'quota-secrets.json')
     this.loadConfig()
+    this.loadSecrets()
+    // Legacy installs kept keys inside quota-config.json; split them on first boot so the
+    // readable file stops carrying secrets even before the user saves anything.
+    if (!existsSync(this.secretsPath)) {
+      try {
+        const { secrets } = splitSecrets(this.config)
+        const hasAny = Object.keys(secrets.providers).length + Object.keys(secrets.accounts).length + Object.keys(secrets.custom).length > 0
+        if (hasAny) this.persistSplit()
+      } catch {}
+    }
+  }
+
+  private loadSecrets(): void {
+    try {
+      if (!existsSync(this.secretsPath)) return
+      const raw = readFileSync(this.secretsPath, 'utf8')
+      const parsed = JSON.parse(raw) as { version?: number; secrets?: Partial<SecretBundle> }
+      this.config = mergeSecrets(this.config, parsed?.secrets)
+    } catch {}
+  }
+
+  /** Persist the secret half first, then the secret-free config, both atomically. */
+  private persistSplit(): void {
+    const { publicConfig, secrets } = splitSecrets(this.config)
+    atomicWriteJsonSync(this.secretsPath, { version: 1, secrets }, 0o600)
+    atomicWriteJsonSync(this.configPath, publicConfig, 0o600)
   }
 
   private registerDefaultProviders(): void {
@@ -267,10 +376,10 @@ export class QuotaManager {
       } else {
         this.config = {
           deepseek: { enabled: true },
-          cursor: { enabled: true, autoDetectLocal: true },
-          antigravity: { enabled: true, autoDetectLocal: true },
-          codex: { enabled: true, autoDetectLocal: true },
-          github_copilot: { enabled: true, autoDetectLocal: true },
+          cursor: { enabled: true, autoDetectLocal: false },
+          antigravity: { enabled: true, autoDetectLocal: false },
+          codex: { enabled: true, autoDetectLocal: false },
+          github_copilot: { enabled: true, autoDetectLocal: false },
           openai_billing: { enabled: false },
           claude: { enabled: false },
           kimi: { enabled: false },
@@ -289,12 +398,17 @@ export class QuotaManager {
         this.saveConfig(this.config)
       }
     } catch {
+      // Keep the unreadable file instead of silently overwriting it on the next save.
+      try {
+        const quarantine = `${this.configPath}.corrupt-${Date.now()}`
+        renameSync(this.configPath, quarantine)
+      } catch {}
       this.config = {
         deepseek: { enabled: true },
-        cursor: { enabled: true, autoDetectLocal: true },
-        antigravity: { enabled: true, autoDetectLocal: true },
-        codex: { enabled: true, autoDetectLocal: true },
-        github_copilot: { enabled: true, autoDetectLocal: true },
+        cursor: { enabled: true, autoDetectLocal: false },
+        antigravity: { enabled: true, autoDetectLocal: false },
+        codex: { enabled: true, autoDetectLocal: false },
+        github_copilot: { enabled: true, autoDetectLocal: false },
         opencode_go: { enabled: true },
         enabledProviders: ['deepseek', 'antigravity', 'cursor', 'codex', 'github_copilot', 'opencode_go'],
         providerOrder: DEFAULT_PROVIDER_ORDER,
@@ -348,7 +462,7 @@ export class QuotaManager {
 
     this.config = merged
     this.cardCache.clear()
-    atomicWriteJsonSync(this.configPath, this.config, 0o600)
+    this.persistSplit()
   }
 
   getSafeConfig(): QuotaConfig {
@@ -411,7 +525,7 @@ export class QuotaManager {
     } catch {}
   }
 
-  public buildInstanceTasks(): Array<{ id: string; providerName: string; accountConfig?: AccountConfigItem }> {
+  public buildInstanceTasks(providerFilter?: string): Array<{ id: string; providerName: string; accountConfig?: AccountConfigItem }> {
     const tasks: Array<{ id: string; providerName: string; accountConfig?: AccountConfigItem }> = []
 
     // 1. Explicit multi-accounts list
@@ -463,14 +577,18 @@ export class QuotaManager {
       }
     }
 
-    return tasks
+    if (!providerFilter) return tasks
+    const needle = providerFilter.toLowerCase()
+    return tasks.filter(t =>
+      t.providerName.toLowerCase().includes(needle) || t.id.toLowerCase().includes(needle)
+    )
   }
 
   private generateSparkline(instanceId: string, _currentRem: number): QuotaSparklinePoint[] {
     return this.historyManager.getUsageTrendPoints(instanceId, 7)
   }
 
-  async getQuotaCards(forceRefresh = false): Promise<{
+  async getQuotaCards(forceRefresh = false, providerFilter?: string): Promise<{
     cards: AuthCardItem[]
     allCards: AuthCardItem[]
     alarms: QuotaAlarm[]
@@ -480,7 +598,7 @@ export class QuotaManager {
     const ttl = Math.max(5000, intervalSec * 1000)
     const now = Date.now()
 
-    const tasks = this.buildInstanceTasks()
+    const tasks = this.buildInstanceTasks(providerFilter)
     const settled = await runWithConcurrency(tasks, async ({ id, providerName, accountConfig }) => {
       const cached = this.cardCache.get(id)
       if (!forceRefresh && cached && (now - cached.fetchedAt) < ttl) {
@@ -672,7 +790,7 @@ export class QuotaManager {
    * Structured summary and intelligent model routing recommendations for DSH Agent Tool calls
    */
   async getAgentQuotaSummary(providerName?: string, forceRefresh = false): Promise<any> {
-    const { cards, alarms, lastUpdated } = await this.getQuotaCards(forceRefresh)
+    const { cards, alarms, lastUpdated } = await this.getQuotaCards(forceRefresh, providerName)
     const targetCards = providerName
       ? cards.filter(c => c.provider.toLowerCase().includes(providerName.toLowerCase()) || c.id.toLowerCase().includes(providerName.toLowerCase()))
       : cards

@@ -14,6 +14,8 @@ export interface MetricWindow {
   windowKind?: '5h' | 'weekly' | 'monthly' | 'sliding' | 'unknown'
   bucketId?: string
   modelFamily?: string
+  /** Truthful amount for balance-only windows; never derive a percentage from it. */
+  amountText?: string
 }
 
 export function makeHudMetricKey(provider: string, groupTitle: string, windowId: string): string {
@@ -143,7 +145,7 @@ export interface QuotaConfig {
   custom_compatible?: CustomCompatibleEndpoint[]
   deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
   cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string; name?: string }
-  codex?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string }
+  codex?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string; syncLocalAuth?: boolean }
   antigravity?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string }
   opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
   github_copilot?: { enabled?: boolean; token?: string; autoDetectLocal?: boolean; name?: string }
@@ -203,14 +205,6 @@ export function escapeCardText(card: AuthCardItem): AuthCardItem {
         subtitle: win.subtitle === undefined ? undefined : escapeHtmlText(win.subtitle),
       })),
     })),
-  }
-}
-
-export function escapeAlarmText(alarm: QuotaAlarm): QuotaAlarm {
-  return {
-    ...alarm,
-    name: escapeHtmlText(alarm.name),
-    message: escapeHtmlText(alarm.message),
   }
 }
 

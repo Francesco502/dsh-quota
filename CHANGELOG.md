@@ -28,7 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 时序历史升级为窗口级别记录（`instanceId::poolId::windowId`），防止跨组混淆；
   - 消耗速度计算（Burn Rate）增加重置与充值识别，重置周期跨越时不产生错误消耗激增。
 
+### Changed
+- **本地凭据探测改为显式授权**：首次安装不再默认 `autoDetectLocal: true`，Cursor / Antigravity / Codex / Copilot 的本机登录态只有用户在设置中勾选后才读取。
+- **DeepSeek 余额不再伪装百分比**：看板与告警均以真实金额呈现，颜色按金额分档；告警文案从"剩余 15%"改为"余额 ¥x.xx"。
+- **密钥与可读配置分离**：新增 `~/.dsh/quota-secrets.json`（0600），`quota-config.json` 不再包含任何密钥；旧版本内联密钥在首次启动时自动迁移。
+- **额度耗尽不再等同于连接失败**：Antigravity / Codex / DeepSeek 的耗尽状态统一为 `warn`，`error` 只表示请求失败，告警文案不再误报"凭据失效"。
+- **单 Provider 查询先过滤再联网**：`get_quota_status(provider)` 只采集目标服务，不再先打全部上游。
+- **不再猜测订阅档位**：Antigravity 未返回 `plan` 时留空，不再硬编码 "Antigravity Pro / Ultra"。
+
 ### Fixed
+- **修复代理凭据泄漏进浏览器 DTO**：`/config` 的 `httpProxy` 同样掩码为 `***:***`。
+- **修复掩码回填按数组下标匹配**：账号重排后不再把 A 的密钥回填给 B，改为按 `id` 匹配。
+- **修复一键测活探测已禁用服务**：被关闭的 provider 不再进入连通性批量测试。
+- **修复余额/额度耗尽被判为 `error`**：见上文状态语义修正。
+- **修复损坏配置被静默覆盖**：解析失败时旧文件重命名为 `quota-config.json.corrupt-<时间戳>` 保留待查。
+- **修复远端文本未转义**：账号邮箱、上游错误体、分组名在进入看板前统一转义；设置表单属性值同样转义。
+- **修复 Codex 被动改写用户登录态**：监控不再刷新/回写 `~/.codex/auth.json`；如需插件代管该文件，显式设置 `codex.syncLocalAuth: true`。
+- **修复趋势采样绑定服务端顺序**：消耗速率改用"稳定活跃窗口"而非 `groups[0].windows[0]`。
+- **修复 Ultra 账号被误标 partial**：只有走 `fetchAvailableModels` 降级分支才标记部分数据。
 - **修复 Antigravity 多账号 Token 刷新污染默认账号配置缺陷**：更新特定账号令牌时严格按 `accountConfig` 作用域写回，不再污染默认全局配置。
 - **修复 Codex 配置 OAuth 刷新后未持久化轮换 Token 缺陷**：显式账号与全局配置均能正确持久化新令牌。
 - **解决客户端全局超时重挂与生命周期泄漏**：移除无宿主防护的 `setTimeout apply({})`，增加 `isDestroyed` 与 `AbortController` 守卫，确保插件销毁后定时器与监听器完全回收。

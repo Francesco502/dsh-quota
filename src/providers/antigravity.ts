@@ -484,7 +484,8 @@ export class AntigravityProvider implements IQuotaProvider {
       const isAnyLow = allWindows.some(w => w.remainingPercent > 0 && w.remainingPercent <= (config.alarmThresholdPercent ?? 15))
       const isAllExhausted = allWindows.length > 0 && allWindows.every(w => w.remainingPercent <= 0)
       const cardStatus = allWindows.length === 0 ? 'ok' : (isAnyLow || isAllExhausted ? 'warn' : 'ok')
-      const planName = summaryData?.plan || (hasArgonPool ? 'Antigravity Pro / Ultra' : 'Google Antigravity')
+      // Never guess the subscription tier: Argon presence is a quota-group fact, not a plan name.
+      const planName = summaryData?.plan || undefined
       // Partial only when a degraded branch produced the numbers; a 2-group Ultra account
       // is a complete answer, not a partial one.
       const usedFallback = groups.length > 0 && !Array.isArray(summaryData?.groups)

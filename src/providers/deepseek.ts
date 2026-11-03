@@ -170,6 +170,9 @@ export class DeepSeekProvider implements IQuotaProvider {
                   usedPercent,
                   remainingPercent: remPercent,
                   barType: 'balance',
+                  // Displayed as an amount everywhere; the percentage above only drives
+                  // colour banding and is never rendered as a quota number.
+                  amountText: `¥${totalAmount.toFixed(2)}`,
                   status: totalAmount <= 0 ? 'exhausted' : 'active',
                 },
               ],

@@ -21,6 +21,8 @@ export interface MetricWindow {
   windowKind?: '5h' | 'weekly' | 'monthly' | 'sliding' | 'unknown'
   bucketId?: string
   modelFamily?: string
+  /** Truthful amount for balance-only windows; never derive a percentage from it. */
+  amountText?: string
 }
 
 export interface MetricGroup {
@@ -155,6 +157,8 @@ export interface QuotaConfig {
     enabled?: boolean
     autoDetectLocal?: boolean
     name?: string
+    /** Opt-in: allow refreshing tokens read from ~/.codex/auth.json and writing them back. */
+    syncLocalAuth?: boolean
     oauth?: {
       accessToken?: string
       refreshToken?: string

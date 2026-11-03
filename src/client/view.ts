@@ -166,6 +166,17 @@ const CATEGORY_NAMES: Record<ProviderCategory | 'all', string> = {
   custom_api: '自定义中转',
 }
 
+/** Escape a value before it is interpolated into markup or an attribute. */
+function esc(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 function getQuotaStatusColor(remainingPercent: number): string {
   if (remainingPercent <= 15) return '#B04A46'
   if (remainingPercent <= 35) return '#BA8137'
@@ -1478,16 +1489,16 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       return `
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-size: 12.5px; font-weight: 600;">显示名称 (自定义) <span style="color: #cf222e;">*</span></label>
-          <input type="text" id="drawer-custom-name-input" class="quota-input" placeholder="例如：NewAPI 分发站 / OneAPI 主池" value="${ep.name || ''}" />
+          <input type="text" id="drawer-custom-name-input" class="quota-input" placeholder="例如：NewAPI 分发站 / OneAPI 主池" value="${esc(ep.name || '')}" />
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-size: 12.5px; font-weight: 600;">Base URL <span style="color: #cf222e;">*</span></label>
-          <input type="text" id="drawer-cust-base" class="quota-input" placeholder="https://api.my-oneapi.com" value="${ep.baseUrl || ''}" />
+          <input type="text" id="drawer-cust-base" class="quota-input" placeholder="https://api.my-oneapi.com" value="${esc(ep.baseUrl || '')}" />
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-size: 12.5px; font-weight: 600;">API Key <span style="color: #cf222e;">*</span></label>
           <div class="quota-input-affix-wrap">
-            <input type="password" id="drawer-cust-key" class="quota-input" placeholder="sk-... / Key" value="${ep.apiKey || ''}" />
+            <input type="password" id="drawer-cust-key" class="quota-input" placeholder="sk-... / Key" value="${esc(ep.apiKey || '')}" />
             <button type="button" class="btn-toggle-eye" data-target="#drawer-cust-key" title="切换显隐">👁</button>
           </div>
         </div>
@@ -1524,7 +1535,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-size: 12.5px; font-weight: 600;">Session Token (WorkosCursorSessionToken)</label>
           <div class="quota-input-affix-wrap">
-            <input type="password" id="drawer-key-input" class="quota-input" placeholder="从浏览器 Cookie 复制 WorkosCursorSessionToken" value="${provConf.sessionToken || ''}" />
+            <input type="password" id="drawer-key-input" class="quota-input" placeholder="从浏览器 Cookie 复制 WorkosCursorSessionToken" value="${esc(provConf.sessionToken || '')}" />
             <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
           </div>
           <button type="button" class="quota-btn secondary action btn-connect-cursor" style="align-self: flex-start; margin-top: 4px;">从本地 Cursor 提取登录态</button>
@@ -1571,7 +1582,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 8px;">
           <label style="font-size: 12.5px; font-weight: 600;">手动填入 Access Token (可选)</label>
           <div class="quota-input-affix-wrap">
-            <input type="password" id="drawer-key-input" class="quota-input" placeholder="access_token" value="${provConf.oauth?.accessToken || ''}" />
+            <input type="password" id="drawer-key-input" class="quota-input" placeholder="access_token" value="${esc(provConf.oauth?.accessToken || '')}" />
             <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
           </div>
         </div>
@@ -1590,7 +1601,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 4px;">
           <label style="font-size: 12.5px; font-weight: 600;">GitHub Token (可选手动填入)</label>
           <div class="quota-input-affix-wrap">
-            <input type="password" id="drawer-key-input" class="quota-input" placeholder="gho_... / ghp_..." value="${provConf.token || ''}" />
+            <input type="password" id="drawer-key-input" class="quota-input" placeholder="gho_... / ghp_..." value="${esc(provConf.token || '')}" />
             <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
           </div>
         </div>
@@ -1600,20 +1611,20 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-size: 12.5px; font-weight: 600;">${meta.keyLabel || 'API Key'} <span style="color: #cf222e;">*</span></label>
           <div class="quota-input-affix-wrap">
-            <input type="password" id="drawer-key-input" class="quota-input" placeholder="${meta.keyPlaceholder || 'API Key'}" value="${provConf.apiKey || ''}" />
+            <input type="password" id="drawer-key-input" class="quota-input" placeholder="${meta.keyPlaceholder || 'API Key'}" value="${esc(provConf.apiKey || '')}" />
             <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
           </div>
         </div>
         ${meta.hasGroupId ? `
           <div style="display: flex; flex-direction: column; gap: 6px;">
             <label style="font-size: 12.5px; font-weight: 600;">Group ID</label>
-            <input type="text" id="drawer-group-input" class="quota-input" placeholder="Group ID" value="${provConf.groupId || ''}" />
+            <input type="text" id="drawer-group-input" class="quota-input" placeholder="Group ID" value="${esc(provConf.groupId || '')}" />
           </div>
         ` : ''}
         ${meta.hasBaseUrl ? `
           <div style="display: flex; flex-direction: column; gap: 6px;">
             <label style="font-size: 12.5px; font-weight: 600;">Base URL (选填)</label>
-            <input type="text" id="drawer-base-input" class="quota-input" placeholder="默认: ${meta.defaultBaseUrl || ''}" value="${provConf.baseUrl || ''}" />
+            <input type="text" id="drawer-base-input" class="quota-input" placeholder="默认: ${meta.defaultBaseUrl || ''}" value="${esc(provConf.baseUrl || '')}" />
           </div>
         ` : ''}
       `
@@ -1622,7 +1633,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     return `
       <div style="display: flex; flex-direction: column; gap: 6px;">
         <label style="font-size: 12.5px; font-weight: 600;">自定义显示名称 (选填)</label>
-        <input type="text" id="drawer-custom-name-input" class="quota-input" placeholder="默认: ${meta.name}" value="${currentCustomName}" />
+        <input type="text" id="drawer-custom-name-input" class="quota-input" placeholder="默认: ${meta.name}" value="${esc(currentCustomName)}" />
       </div>
 
       ${credInfo.isConfigured ? `
@@ -1745,7 +1756,6 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
 
                 const rowsHtml = group.windows.map(win => {
                   const rem = Math.max(0, Math.min(100, Math.round(win.remainingPercent)))
-                  const statusColor = getQuotaStatusColor(rem)
                   const subText = formatWindowSubtitle(win)
 
                   // Check if this is a balance-only metric (no percentage suitable)
@@ -1759,6 +1769,10 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                   if (isBalance && card.balance) {
                     const sym = card.balance.currency === 'USD' ? '$' : '¥'
                     const amount = Number(card.balance.remaining).toFixed(2)
+                    // Colour a balance by money left, never by a derived percentage.
+                    const balanceColor = Number(card.balance.remaining) <= 5
+                      ? '#B04A46'
+                      : (Number(card.balance.remaining) <= 20 ? '#BA8137' : '#3F7A63')
 
                     return `
                       <div class="card-row">
@@ -1769,7 +1783,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                         <div class="row-right-metric">
                           ${renderSparklineSvg(card.sparkline, rem, 80, 24)}
                           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1px;">
-                            <div style="display: inline-flex; align-items: baseline; color: ${statusColor}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;">
+                            <div style="display: inline-flex; align-items: baseline; color: ${balanceColor}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;">
                               <span style="font-size: 11.5px; font-weight: 600; margin-right: 1.5px; opacity: 0.85;">${sym}</span>
                               <span style="font-size: 15.5px; font-weight: 700; letter-spacing: -0.3px;">${amount}</span>
                             </div>
@@ -1782,6 +1796,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                     `
                   }
 
+                  const statusColor = getQuotaStatusColor(rem)
                   return `
                     <div class="card-row">
                       <div class="row-left-content">
@@ -2055,7 +2070,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                   ${renderHelp('当剩余额度百分比低于此数值时触发警告徽章与系统通知')}
                 </div>
                 <div style="display: flex; align-items: center; gap: 10px;">
-                  <input type="range" id="pref-alarm-slider" min="5" max="50" step="5" value="${alarmThreshold}" style="width: 140px; cursor: pointer;" />
+                  <input type="range" id="pref-alarm-slider" min="5" max="50" step="5" value="${esc(alarmThreshold)}" style="width: 140px; cursor: pointer;" />
                   <span id="pref-alarm-val" style="font-size: 13px; font-weight: 700; color: #3F7A63; min-width: 36px;">${alarmThreshold}%</span>
                 </div>
               </div>
@@ -2081,7 +2096,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
               </div>
               <div style="display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.05)); padding-top: 10px;">
                 <span style="font-size: 12.5px; font-weight: 600;">网络代理 (HTTP Proxy)</span>
-                <input type="text" id="pref-proxy-input" class="quota-input" placeholder="例如: http://127.0.0.1:7890 (留空直连)" value="${cfg.httpProxy || ''}" />
+                <input type="text" id="pref-proxy-input" class="quota-input" placeholder="例如: http://127.0.0.1:7890 (留空直连)" value="${esc(cfg.httpProxy || '')}" />
               </div>
             </div>
 

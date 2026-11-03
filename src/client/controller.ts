@@ -1,5 +1,5 @@
 import type { AuthCardItem, QuotaConfig, QuotaClientApi, QuotaAlarm, ProviderCategory, TestConnectionResult, QuotaHistoryPoint, AccountConfigItem } from './api.ts'
-import { getRefreshIntervalSeconds, escapeCardText, escapeAlarmText } from './api.ts'
+import { getRefreshIntervalSeconds, escapeCardText } from './api.ts'
 
 export type Listener = () => void
 
@@ -285,7 +285,9 @@ export class QuotaController {
       const data = await this.api.getCards(force)
       this.cards = (data.cards || []).map(escapeCardText)
       this.allCards = (data.allCards || data.cards || []).map(escapeCardText)
-      this.alarms = (data.alarms || []).map(escapeAlarmText)
+      // Alarms reach the OS notification body as plain text; escaping here would print
+      // entities. Any future HTML surface must escape at its own render site.
+      this.alarms = data.alarms || []
       this.lastUpdated = data.lastUpdated
       this.triggerDesktopNotification(this.alarms)
       if (silent) {
