@@ -494,11 +494,11 @@ export class QuotaManager {
         const result = await provider.fetchCard(this.config, accountConfig)
         const card = result.card
         // Calculate burn rate & estimated hours
-        const remPercent = card.groups[0]?.windows[0]?.remainingPercent ?? 100
-        const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(id, remPercent)
+        const rep = this.representativeWindow(card)
+        const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(id, rep.remainingPercent)
         card.burnRatePerHour = burnRatePerHour
         card.estimatedHoursLeft = estimatedHoursLeft
-        card.sparkline = this.generateSparkline(id, remPercent)
+        card.sparkline = this.generateSparkline(id, rep.remainingPercent)
 
         const customName = (this.config as any)[providerName]?.name || this.config.customNames?.[id] || this.config.customNames?.[providerName]
         if (customName) {
@@ -562,6 +562,23 @@ export class QuotaManager {
     }
   }
 
+  /**
+   * Pick one window to represent a card's short-cycle trend.
+   *
+   * Index 0 is server order, which changes when a new pool (e.g. Gemini 4 Argon)
+   * appears; keeping a series on whatever happened to be first would splice two
+   * incomparable pools into one burn-rate sample. Prefer an active, non-unknown
+   * window and fall back to the first window that exists.
+   */
+  private representativeWindow(card: AuthCardItem): { remainingPercent: number; windowId?: string } {
+    const all = card.groups.flatMap(g => g.windows)
+    const preferred = all.find(w => w.status !== 'unknown' && w.status !== 'disabled' && w.remainingPercent > 0)
+      ?? all.find(w => w.status !== 'unknown' && w.status !== 'disabled')
+      ?? all[0]
+    if (!preferred) return { remainingPercent: 100 }
+    return { remainingPercent: preferred.remainingPercent, windowId: preferred.id }
+  }
+
   async refreshSingleProvider(instanceOrProvider: string): Promise<AuthCardItem | undefined> {
     const tasks = this.buildInstanceTasks()
     const task = tasks.find(t => t.id === instanceOrProvider || t.providerName === instanceOrProvider)
@@ -573,11 +590,11 @@ export class QuotaManager {
     try {
       const res = await provider.fetchCard(this.config, task.accountConfig)
       const card = res.card
-      const remPercent = card.groups[0]?.windows[0]?.remainingPercent ?? 100
-      const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(task.id, remPercent)
+      const rep = this.representativeWindow(card)
+      const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(task.id, rep.remainingPercent)
       card.burnRatePerHour = burnRatePerHour
       card.estimatedHoursLeft = estimatedHoursLeft
-      card.sparkline = this.generateSparkline(task.id, remPercent)
+      card.sparkline = this.generateSparkline(task.id, rep.remainingPercent)
 
       const customName = (this.config as any)[task.providerName]?.name || this.config.customNames?.[task.id] || this.config.customNames?.[task.providerName]
       if (customName) {
