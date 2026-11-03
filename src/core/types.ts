@@ -1,11 +1,12 @@
 /**
  * Data structures for Quota tracking & Single Long Card UI
- * @version 0.3.1
+ * @version 0.4.0
  */
 
-export const PLUGIN_VERSION = '0.3.1'
+export const PLUGIN_VERSION = '0.4.0'
 
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
+export type ProxyMode = 'direct' | 'proxy-required' | 'proxy-preferred'
 
 export interface MetricWindow {
   id: string
@@ -14,12 +15,21 @@ export interface MetricWindow {
   usedPercent: number
   remainingPercent: number
   resetAt?: string
-  barType?: 'circle' | 'line'
+  barType?: 'circle' | 'line' | 'balance'
+  status?: 'active' | 'disabled' | 'unknown' | 'exhausted'
+  rawFraction?: number
+  windowKind?: '5h' | 'weekly' | 'monthly' | 'sliding' | 'unknown'
+  bucketId?: string
+  modelFamily?: string
+  /** Truthful amount for balance-only windows; never derive a percentage from it. */
+  amountText?: string
 }
 
 export interface MetricGroup {
+  id?: string
   title: string
   hasInfoIcon?: boolean
+  poolType?: 'gemini' | 'argon' | 'claude_gpt' | 'custom' | 'general'
   windows: MetricWindow[]
 }
 
@@ -31,11 +41,20 @@ export interface QuotaBalanceInfo {
   grantedBalance?: number    // 赠送金/赠送额度
   toppedUpBalance?: number   // 充值金额
   expireTime?: string
+  isEstimate?: boolean       // 是否为根据用量估算而非官方直读
 }
 
 export interface QuotaSparklinePoint {
   t: number // timestamp
   r: number // remaining percent (0-100)
+}
+
+export interface SourceProvenance {
+  endpoint?: string
+  method?: 'official-summary' | 'model-fallback' | 'local-state' | 'oauth-api' | 'user-balance'
+  timestamp: number
+  partial?: boolean
+  host?: string
 }
 
 export interface AuthCardItem {
@@ -53,20 +72,28 @@ export interface AuthCardItem {
   estimatedHoursLeft?: number // Estimated hours until exhaustion
   sparkline?: QuotaSparklinePoint[] // Recent 7-day trend points for instant SVG rendering
   lastUpdated: number
+  stale?: boolean
+  sourceProvenance?: SourceProvenance
 }
 
 export interface QuotaHistoryPoint {
   timestamp: number
   instanceId: string
+  poolId?: string
+  windowId?: string
+  windowKind?: string
   remainingPercent: number
   usedPercent: number
   remainingBalance?: number
+  resetAt?: string
 }
 
 export interface QuotaAlarm {
   instanceId: string
   provider: string
   name: string
+  poolId?: string
+  windowId?: string
   level: 'warn' | 'critical'
   message: string
   timestamp: number
@@ -104,7 +131,9 @@ export interface CustomCompatibleEndpoint {
 }
 
 export interface QuotaConfig {
+  schemaVersion?: number
   httpProxy?: string
+  proxyMode?: ProxyMode
   enabledProviders?: string[] // 看板展示服务列表
   floatingHudProviders?: string[] // 悬浮球展示服务列表
   providerOrder?: string[]
@@ -128,6 +157,8 @@ export interface QuotaConfig {
     enabled?: boolean
     autoDetectLocal?: boolean
     name?: string
+    /** Opt-in: allow refreshing tokens read from ~/.codex/auth.json and writing them back. */
+    syncLocalAuth?: boolean
     oauth?: {
       accessToken?: string
       refreshToken?: string

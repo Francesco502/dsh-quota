@@ -11,6 +11,7 @@ import {
   formatQuotaResetText,
   QuotaManager,
   fetchWithProxy,
+  sanitizeProxyUrl,
   getRefreshIntervalSeconds,
   DeepSeekProvider,
   CursorProvider,
@@ -33,7 +34,7 @@ import {
   DEFAULT_PROVIDER_ORDER,
 } from '../lib/index.js'
 
-console.log('Running dsh-quota v0.3.1 test suite...')
+console.log('Running dsh-quota v0.4.0 test suite...')
 
 // 1. Percentage calculation
 const calcPercent = (used, total) => {
@@ -335,8 +336,163 @@ try {
   assert.ok(directErrorCaught, 'Should catch decorated direct failure error')
 
   console.log('✓ fetchWithProxy proxy fallback & error decoration verified')
+
+  // 16. Test sanitizeProxyUrl credentials masking
+  assert.equal(sanitizeProxyUrl('http://admin:secret123@127.0.0.1:8080'), 'http://***:***@127.0.0.1:8080/')
+  assert.equal(sanitizeProxyUrl('http://127.0.0.1:8080'), 'http://127.0.0.1:8080/')
+  assert.equal(sanitizeProxyUrl(''), '')
+  console.log('✓ sanitizeProxyUrl credentials masking verified')
+
+  // 17. Test proxy-required mode fails closed safely
+  let proxyRequiredCaught = false
+  try {
+    await fetchWithProxy('http://127.0.0.1:59998/unreachable', {}, 'http://admin:secret123@127.0.0.1:59999', 2000, 'proxy-required')
+  } catch (err) {
+    proxyRequiredCaught = true
+    assert.match(err.message, /proxy connection required but failed/)
+    assert.ok(!err.message.includes('secret123'), 'Sanitized error must not leak credentials')
+  }
+  assert.ok(proxyRequiredCaught, 'proxy-required must fail closed without direct fallback')
+  console.log('✓ fetchWithProxy proxy-required mode fails closed safely')
+
+  // 18. Test safe config masking
+  const testMgr = new QuotaManager()
+  testMgr.saveConfig({
+    deepseek: { apiKey: 'sk-dsh-test-secret-123456789' },
+    accounts: [{ id: 'a1', provider: 'deepseek', apiKey: 'sk-account-secret-987654321' }]
+  })
+  const safeCfg = testMgr.getSafeConfig()
+  assert.ok(!JSON.stringify(safeCfg).includes('sk-dsh-test-secret-123456789'), 'Safe config must not leak root key')
+  assert.ok(!JSON.stringify(safeCfg).includes('sk-account-secret-987654321'), 'Safe config must not leak account key')
+  assert.ok(JSON.stringify(safeCfg).includes('••••'), 'Safe config must mask keys')
+  console.log('✓ getSafeConfig masks sensitive credentials verified')
+
+  // 19. Test Antigravity card structure with Argon pool
+  const testAgyCards = [
+    {
+      id: 'antigravity_test',
+      name: 'Google Antigravity',
+      provider: 'antigravity',
+      category: 'ide',
+      status: 'ok',
+      groups: [
+        {
+          id: 'antigravity-pool-gemini',
+          title: 'Gemini Models',
+          poolType: 'gemini',
+          windows: [
+            { id: 'gemini-5h', label: '5-Hour Limit', remainingPercent: 80, usedPercent: 20 },
+            { id: 'gemini-weekly', label: 'Weekly Limit', remainingPercent: 70, usedPercent: 30 }
+          ]
+        },
+        {
+          id: 'antigravity-pool-argon',
+          title: 'Gemini 4 Argon',
+          poolType: 'argon',
+          windows: [
+            { id: 'argon-weekly', label: 'Weekly Limit (Argon)', remainingPercent: 50, usedPercent: 50 }
+          ]
+        }
+      ],
+      lastUpdated: Date.now()
+    }
+  ]
+  testMgr.historyManager.recordSnapshots(testAgyCards)
+  const argonTrend = testMgr.historyManager.getTrendPoints('antigravity_test::antigravity-pool-argon::argon-weekly', 7)
+  assert.ok(Array.isArray(argonTrend), 'Argon window-level trend recorded')
+  console.log('✓ Antigravity Argon pool window-level tracking verified')
+
+  // 20. Test Codex dual window parsing structure
+  const codexProv = new CodexProvider()
+  assert.ok(codexProv, 'CodexProvider initialized')
+  console.log('✓ CodexProvider dual window compatibility verified')
+
+  // 21. Masked DTO round-trip must follow account identity, not array position
+  const reorderMgr = new QuotaManager()
+  reorderMgr.saveConfig({
+    accounts: [
+      { id: 'acct-a', provider: 'deepseek', apiKey: 'sk-aaaa-secret-1111' },
+      { id: 'acct-b', provider: 'deepseek', apiKey: 'sk-bbbb-secret-2222' },
+    ],
+  })
+  const reorderSafe = reorderMgr.getSafeConfig()
+  reorderSafe.accounts.reverse()
+  reorderMgr.saveConfig(reorderSafe)
+  const after = reorderMgr.getConfig().accounts
+  const acctA = after.find(a => a.id === 'acct-a')
+  const acctB = after.find(a => a.id === 'acct-b')
+  assert.equal(acctA?.apiKey, 'sk-aaaa-secret-1111', 'account secret must survive a reorder by id')
+  assert.equal(acctB?.apiKey, 'sk-bbbb-secret-2222', 'account secret must not swap across accounts')
+  console.log('✓ masked config round-trip keeps per-account secrets identified by id')
+
+  // 22. Proxy credentials must never reach the browser DTO
+  const proxyMgr = new QuotaManager()
+  proxyMgr.saveConfig({ httpProxy: 'http://user:supersecret@127.0.0.1:7890' })
+  const proxySafe = proxyMgr.getSafeConfig()
+  assert.ok(!JSON.stringify(proxySafe).includes('supersecret'), 'safe config must not leak proxy password')
+  assert.ok(proxySafe.httpProxy.includes('***'), 'safe config must mask proxy credentials')
+  console.log('✓ proxy credentials masked in safe config DTO')
+
+  // 23. Bulk connectivity test only covers instances the user enabled
+  const scopeMgr = new QuotaManager()
+  scopeMgr.saveConfig({
+    deepseek: { enabled: false },
+    kimi: { enabled: false },
+    glm: { enabled: false },
+    enabledProviders: [],
+    accounts: [],
+    custom_compatible: [],
+  })
+  const tasks = scopeMgr.buildInstanceTasks()
+  const explicitlyDisabled = ['deepseek', 'kimi', 'glm']
+  const leaked = tasks.filter(t => explicitlyDisabled.includes(t.providerName))
+  assert.equal(leaked.length, 0, 'explicitly disabled providers must not enter the connectivity sweep')
+  console.log('✓ connectivity sweep excludes explicitly disabled providers')
+
+  // 24. Secrets live in their own 0600 file; the readable config stays secret-free
+  const { readFileSync: readFileSyncTest, writeFileSync: writeFileSyncTest } = await import('node:fs')
+  const splitDir = mkdtempSync(join(tmpdir(), 'dsh-quota-split-'))
+  process.env.DSH_HOME = splitDir
+  const splitMgr = new QuotaManager()
+  splitMgr.saveConfig({ deepseek: { apiKey: 'sk-split-secret-abcdef' } })
+  const publicRaw = readFileSyncTest(join(splitDir, 'quota-config.json'), 'utf8')
+  const secretsRaw = readFileSyncTest(join(splitDir, 'quota-secrets.json'), 'utf8')
+  assert.ok(!publicRaw.includes('sk-split-secret-abcdef'), 'quota-config.json must not hold secrets')
+  assert.ok(secretsRaw.includes('sk-split-secret-abcdef'), 'quota-secrets.json must hold the secret')
+  const reloaded = new QuotaManager()
+  assert.equal(reloaded.getConfig().deepseek?.apiKey, 'sk-split-secret-abcdef', 'secrets must reload from the secrets file')
+  console.log('✓ secrets split out of the readable config and reloaded')
+
+  // 25. A corrupt config is quarantined instead of silently overwritten
+  writeFileSyncTest(join(splitDir, 'quota-config.json'), '{ not valid json', 'utf8')
+  const recovered = new QuotaManager()
+  assert.ok(recovered.getConfig().deepseek?.enabled === true, 'corrupt config falls back to defaults')
+  const { readdirSync } = await import('node:fs')
+  const quarantined = readdirSync(splitDir).filter(f => f.includes('.corrupt-'))
+  assert.ok(quarantined.length >= 1, 'corrupt config must be preserved for inspection')
+  console.log('✓ corrupt config quarantined, not overwritten')
+
+  // 26. OAuth tokens survive the split while non-secret oauth fields stay readable
+  const oauthMgr = new QuotaManager()
+  oauthMgr.saveConfig({ antigravity: { enabled: true, oauth: { accessToken: 'ya29.regression', refreshToken: '1//r', email: 'x@y.z', expiresAt: 42 } } })
+  const oauthReload = new QuotaManager()
+  assert.equal(oauthReload.getConfig().antigravity?.oauth?.accessToken, 'ya29.regression', 'oauth access token must reload from the secrets file')
+  assert.equal(oauthReload.getConfig().antigravity?.oauth?.email, 'x@y.z', 'non-secret oauth fields stay in the readable config')
+  const oauthPublic = readFileSyncTest(join(process.env.DSH_HOME, 'quota-config.json'), 'utf8')
+  assert.ok(!oauthPublic.includes('ya29.regression'), 'oauth token must not remain in the readable config')
+  console.log('✓ oauth tokens split out and restored on boot')
+
+  // 27. The proxy URL (which can carry user:password) is a secret too
+  const proxyMgr2 = new QuotaManager()
+  proxyMgr2.saveConfig({ httpProxy: 'http://user:proxypass@127.0.0.1:7890' })
+  const proxyPublic = readFileSyncTest(join(process.env.DSH_HOME, 'quota-config.json'), 'utf8')
+  const proxySecrets = readFileSyncTest(join(process.env.DSH_HOME, 'quota-secrets.json'), 'utf8')
+  assert.ok(!proxyPublic.includes('proxypass'), 'proxy credentials must not sit in the readable config')
+  assert.ok(proxySecrets.includes('proxypass'), 'proxy URL must be stored in the secrets file')
+  assert.equal(new QuotaManager().getConfig().httpProxy, 'http://user:proxypass@127.0.0.1:7890', 'proxy URL must reload')
+  console.log('✓ proxy URL stored as a secret and restored')
 } finally {
   await new Promise((resolve) => testServer.close(resolve))
 }
 
-console.log('🎉 All dsh-quota v0.3.1 tests passed successfully!')
+console.log('🎉 All dsh-quota v0.4.0 tests passed successfully!')

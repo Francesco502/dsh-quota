@@ -11,6 +11,16 @@ function sha256(str: string): Buffer {
   return createHash('sha256').update(str).digest()
 }
 
+function escapeHtml(str?: string): string {
+  if (!str) return ''
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 /**
  * Safely find an open and available port on host without throwing or crashing
  */
@@ -50,17 +60,49 @@ async function findAvailablePort(preferredPorts: number[], host = '127.0.0.1'): 
 export class OAuthManager {
   private activeCodexServer: http.Server | null = null
   private activeAntigravityServer: http.Server | null = null
+  private codexAutoCloseTimer: any = null
+  private antigravityAutoCloseTimer: any = null
 
   private codexVerifier: string | null = null
   private codexState: string | null = null
 
   private antigravityState: string | null = null
 
+  public dispose(): void {
+    if (this.codexAutoCloseTimer) {
+      clearTimeout(this.codexAutoCloseTimer)
+      this.codexAutoCloseTimer = null
+    }
+    if (this.antigravityAutoCloseTimer) {
+      clearTimeout(this.antigravityAutoCloseTimer)
+      this.antigravityAutoCloseTimer = null
+    }
+    if (this.activeCodexServer) {
+      try {
+        this.activeCodexServer.removeAllListeners()
+        this.activeCodexServer.close()
+      } catch {}
+      this.activeCodexServer = null
+    }
+    if (this.activeAntigravityServer) {
+      try {
+        this.activeAntigravityServer.removeAllListeners()
+        this.activeAntigravityServer.close()
+      } catch {}
+      this.activeAntigravityServer = null
+    }
+  }
+
   // --- CODEX (ChatGPT OAuth) ---
   async startCodexLogin(
     onSuccess: (tokens: { accessToken: string; refreshToken?: string; accountId?: string; expiresAt?: number }) => void,
-    proxyUrl?: string
+    proxyUrl?: string,
+    proxyMode?: any
   ): Promise<{ authUrl: string }> {
+    if (this.codexAutoCloseTimer) {
+      clearTimeout(this.codexAutoCloseTimer)
+      this.codexAutoCloseTimer = null
+    }
     if (this.activeCodexServer) {
       try {
         this.activeCodexServer.removeAllListeners()
@@ -110,7 +152,7 @@ export class OAuthManager {
                 redirect_uri: redirectUri,
                 code_verifier: this.codexVerifier!,
               }),
-            }, proxyUrl)
+            }, proxyUrl, 20000, proxyMode)
 
             if (!tokenRes.ok) {
               const errBody = await tokenRes.text()
@@ -142,7 +184,7 @@ export class OAuthManager {
             res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;text-align:center;"><h2>✅ Codex 授权成功！</h2><p>凭据已自动同步至 DSH 额度监控，您可以关闭此网页并返回 DSH 页面。</p></body></html>')
           } catch (err: any) {
             res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' })
-            res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;line-height:1.6;"><h2>❌ 授权换取令牌失败</h2><p style="color:#d32f2f;font-weight:600;">${err.message}</p><p style="font-size:13px;color:#666;">原因说明：OpenAI 官方授权接口严格检测 IP 地区。若当前宿主直连被拦截，请在「额度监控 -> 设置」中填写代理地址（如 http://127.0.0.1:7890），或直接粘贴 ~/.codex/auth.json 中的 access_token。</p></body></html>`)
+            res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;line-height:1.6;"><h2>❌ 授权换取令牌失败</h2><p style="color:#d32f2f;font-weight:600;">${escapeHtml(err.message)}</p><p style="font-size:13px;color:#666;">原因说明：OpenAI 官方授权接口严格检测 IP 地区。若当前宿主直连被拦截，请在「额度监控 -> 设置」中填写代理地址（如 http://127.0.0.1:7890），或直接粘贴 ~/.codex/auth.json 中的 access_token。</p></body></html>`)
           }
         } else {
           res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -157,7 +199,7 @@ export class OAuthManager {
             } catch {}
             this.activeCodexServer = null
           }
-        }, 3000)
+        }, 2000)
       } else {
         res.writeHead(404)
         res.end()
@@ -174,14 +216,30 @@ export class OAuthManager {
       server.listen(port, '127.0.0.1', () => resolve())
     })
 
+    // Auto close server after 5 minutes if user abandons
+    this.codexAutoCloseTimer = setTimeout(() => {
+      if (this.activeCodexServer) {
+        try {
+          this.activeCodexServer.removeAllListeners()
+          this.activeCodexServer.close()
+        } catch {}
+        this.activeCodexServer = null
+      }
+    }, 300_000)
+
     return { authUrl }
   }
 
   // --- ANTIGRAVITY (Google OAuth) ---
   async startAntigravityLogin(
     onSuccess: (tokens: { accessToken: string; refreshToken?: string; expiresAt?: number; email?: string; name?: string }) => void,
-    proxyUrl?: string
+    proxyUrl?: string,
+    proxyMode?: any
   ): Promise<{ authUrl: string }> {
+    if (this.antigravityAutoCloseTimer) {
+      clearTimeout(this.antigravityAutoCloseTimer)
+      this.antigravityAutoCloseTimer = null
+    }
     if (this.activeAntigravityServer) {
       try {
         this.activeAntigravityServer.removeAllListeners()
@@ -194,7 +252,6 @@ export class OAuthManager {
     const clientId = String.fromCharCode(49,48,55,49,48,48,54,48,54,48,53,57,49,45,116,109,104,115,115,105,110,50,104,50,49,108,99,114,101,50,51,53,118,116,111,108,111,106,104,52,103,52,48,51,101,112,46,97,112,112,115,46,103,111,111,103,108,101,117,115,101,114,99,111,110,116,101,110,116,46,99,111,109)
     const clientSecret = String.fromCharCode(71,79,67,83,80,88,45,75,53,56,70,87,82,52,56,54,76,100,76,74,49,109,76,66,56,115,88,67,52,122,54,113,68,65,102)
 
-    // Find an available port cleanly (prefer 51121 -> alternative 51122, 51123, 43110, 31280 -> dynamic 0)
     const boundPort = await findAvailablePort([51121, 51122, 51123, 43110, 31280, 0], '127.0.0.1')
     const resolvedRedirectUri = `http://127.0.0.1:${boundPort}/oauthcallback`
 
@@ -204,7 +261,7 @@ export class OAuthManager {
         const error = url.searchParams.get('error')
         if (error) {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-          res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;text-align:center;"><h2>⚠️ 授权未完成</h2><p>Google 授权已被取消或返回错误: ${error}</p></body></html>`)
+          res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;text-align:center;"><h2>⚠️ 授权未完成</h2><p>Google 授权已被取消或返回错误: ${escapeHtml(error)}</p></body></html>`)
           return
         }
 
@@ -223,7 +280,7 @@ export class OAuthManager {
                 grant_type: 'authorization_code',
                 redirect_uri: resolvedRedirectUri,
               }),
-            }, proxyUrl, 20000)
+            }, proxyUrl, 20000, proxyMode)
 
             if (!tokenRes.ok) {
               const errText = await tokenRes.text()
@@ -236,13 +293,12 @@ export class OAuthManager {
             const expiresIn = tokenData.expires_in || 3600
             const expiresAt = Date.now() + expiresIn * 1000
 
-            // Try fetching profile for email display
             let userEmail: string | undefined
             let userName: string | undefined
             try {
               const infoRes = await fetchWithProxy('https://www.googleapis.com/oauth2/v2/userinfo', {
                 headers: { Authorization: `Bearer ${accessToken}` },
-              }, proxyUrl, 8000)
+              }, proxyUrl, 8000, proxyMode)
               if (infoRes.ok) {
                 const info = await infoRes.json() as any
                 userEmail = info.email
@@ -259,14 +315,14 @@ export class OAuthManager {
 <body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:40px;text-align:center;background:#f8f9fa;">
   <div style="max-width:480px;margin:0 auto;background:#fff;padding:32px 24px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
     <h2 style="color:#2e7d32;margin-top:0;">✅ Google Antigravity 登录成功！</h2>
-    <p style="color:#444;font-size:15px;margin:16px 0;">${userEmail ? `已关联账号：<strong>${userEmail}</strong><br/>` : ''}凭据已自动同步至 DSH 额度监控。</p>
+    <p style="color:#444;font-size:15px;margin:16px 0;">${userEmail ? `已关联账号：<strong>${escapeHtml(userEmail)}</strong><br/>` : ''}凭据已自动同步至 DSH 额度监控。</p>
     <p style="color:#666;font-size:13px;">您可以安全地关闭当前网页，并返回 DSH 额度监控页面查看配额。</p>
   </div>
 </body>
 </html>`)
           } catch (err: any) {
             res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' })
-            res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;"><h2>❌ Google 登录失败</h2><p style="color:#d32f2f;">${err.message}</p><p style="color:#666;font-size:13px;">提示：若网络处于受限地区，请在 DSH 额度监控「设置」中配置 HTTP 代理后重试。</p></body></html>`)
+            res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;"><h2>❌ Google 登录失败</h2><p style="color:#d32f2f;">${escapeHtml(err.message)}</p><p style="color:#666;font-size:13px;">提示：若网络处于受限地区，请在 DSH 额度监控「设置」中配置 HTTP 代理后重试。</p></body></html>`)
           }
         } else {
           res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -281,7 +337,7 @@ export class OAuthManager {
             } catch {}
             this.activeAntigravityServer = null
           }
-        }, 5000)
+        }, 2000)
       } else {
         res.writeHead(404)
         res.end()
@@ -296,6 +352,17 @@ export class OAuthManager {
     await new Promise<void>((resolve) => {
       server.listen(boundPort, '127.0.0.1', () => resolve())
     })
+
+    // Auto close server after 5 minutes if user abandons
+    this.antigravityAutoCloseTimer = setTimeout(() => {
+      if (this.activeAntigravityServer) {
+        try {
+          this.activeAntigravityServer.removeAllListeners()
+          this.activeAntigravityServer.close()
+        } catch {}
+        this.activeAntigravityServer = null
+      }
+    }, 300_000)
 
     const scopes = [
       'https://www.googleapis.com/auth/cloud-platform',

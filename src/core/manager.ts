@@ -19,7 +19,8 @@ import { CustomApiProvider } from '../providers/custom-api.ts'
 import { OAuthManager } from './oauth.ts'
 import { QuotaHistoryManager } from './history.ts'
 import { QuotaAlarmDetector } from './alarm.ts'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { sanitizeProxyUrl } from './fetch.ts'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { atomicWriteJsonSync } from './paths.ts'
@@ -60,9 +61,9 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, { primaryId: string; availa
     role: '海外顶尖全模型智能聚合路由',
   },
   antigravity: {
-    primaryId: 'gemini-2.0-flash',
-    available: ['gemini-2.0-flash', 'claude-3-5-sonnet', 'gemini-2.0-pro-exp'],
-    role: '超长上下文与快速代码重构',
+    primaryId: 'gemini-3.8-flash',
+    available: ['gemini-3.8-flash', 'gemini-3.1-pro', 'gemini-4-argon', 'claude-sonnet-5-5', 'claude-opus-5-5'],
+    role: '超长上下文、快速响应与高阶多模态分析',
   },
   cursor: {
     primaryId: 'claude-3.5-sonnet',
@@ -70,9 +71,9 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, { primaryId: string; availa
     role: 'IDE 本地编程补全与编辑',
   },
   codex: {
-    primaryId: 'gpt-4o',
-    available: ['gpt-4o', 'o1', 'o3-mini'],
-    role: '深度复杂推理与多轮问答',
+    primaryId: 'gpt-6.1-sol',
+    available: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.1-terra', 'gpt-6-luna'],
+    role: '深度复杂推理、代码架构与多轮长任务',
   },
   github_copilot: {
     primaryId: 'gpt-4o',
@@ -85,9 +86,9 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, { primaryId: string; availa
     role: 'OpenAI 官方 API 全量能力',
   },
   claude: {
-    primaryId: 'claude-3-5-sonnet-20241022',
-    available: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
-    role: '高精度代码架构与逻辑推理',
+    primaryId: 'claude-sonnet-5-5',
+    available: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-3-5-sonnet'],
+    role: '高精度代码架构、深度逻辑推理与工程交付',
   },
   kimi: {
     primaryId: 'moonshot-v1-auto',
@@ -164,6 +165,133 @@ interface CacheEntry {
   fetchedAt: number
 }
 
+function maskSecret(val?: string): string {
+  if (!val) return ''
+  const trimmed = String(val).trim()
+  if (trimmed.length <= 8) return '••••••••'
+  return `${trimmed.slice(0, 4)}••••${trimmed.slice(-4)}`
+}
+
+function restoreMaskedSecrets(incoming: any, existing: any): any {
+  if (!incoming || typeof incoming !== 'object') return incoming
+  if (!existing || typeof existing !== 'object') return incoming
+  const res = Array.isArray(incoming) ? [...incoming] : { ...incoming }
+  // Arrays of records (accounts / custom endpoints) are matched by `id`, never by index:
+  // index matching would hand account B the masked secret of account A after a reorder.
+  if (Array.isArray(incoming) && Array.isArray(existing)) {
+    const byId = new Map<string, any>()
+    for (const item of existing) {
+      if (item && typeof item === 'object' && typeof item.id === 'string') byId.set(item.id, item)
+    }
+    return incoming.map((item: any) => {
+      if (!item || typeof item !== 'object') return item
+      const prev = typeof item.id === 'string' ? byId.get(item.id) : undefined
+      return prev ? restoreMaskedSecrets(item, prev) : item
+    })
+  }
+  for (const k of Object.keys(res)) {
+    if (typeof res[k] === 'string' && (res[k] === '***' || res[k] === '••••••••' || res[k].includes('••••'))) {
+      if (existing[k] !== undefined) {
+        res[k] = existing[k]
+      }
+    } else if (typeof res[k] === 'object' && res[k] !== null) {
+      res[k] = restoreMaskedSecrets(res[k], existing[k])
+    }
+  }
+  return res
+}
+
+
+const SECRET_STRING_KEYS = ['apiKey', 'sessionToken', 'token', 'sessionKey'] as const
+
+interface SecretBundle {
+  providers: Record<string, Record<string, unknown>>
+  accounts: Record<string, Record<string, unknown>>
+  custom: Record<string, Record<string, unknown>>
+  /** Proxy URL, which may embed `user:password@`. */
+  proxy?: string
+}
+
+function emptyBundle(): SecretBundle {
+  return { providers: {}, accounts: {}, custom: {} }
+}
+
+/**
+ * Move every secret out of a config copy, returning both halves.
+ *
+ * `quota-config.json` is the file users screenshot, diff and paste into issues;
+ * keeping live keys out of it is worth a second 0600 file next to it.
+ */
+function splitSecrets(config: QuotaConfig): { publicConfig: QuotaConfig; secrets: SecretBundle } {
+  const publicConfig: any = JSON.parse(JSON.stringify(config || {}))
+  const secrets = emptyBundle()
+
+  const takeFrom = (target: any, store: Record<string, Record<string, unknown>>, bucket: string): void => {
+    if (!target || typeof target !== 'object') return
+    const found: Record<string, unknown> = {}
+    for (const key of SECRET_STRING_KEYS) {
+      if (typeof target[key] === 'string' && target[key]) {
+        found[key] = target[key]
+        delete target[key]
+      }
+    }
+    if (target.oauth && typeof target.oauth === 'object') {
+      const oauth: Record<string, unknown> = {}
+      for (const key of ['accessToken', 'refreshToken', 'accountId']) {
+        if (typeof target.oauth[key] === 'string' && target.oauth[key]) {
+          oauth[key] = target.oauth[key]
+          delete target.oauth[key]
+        }
+      }
+      if (Object.keys(oauth).length > 0) found.oauth = oauth
+    }
+    if (Object.keys(found).length > 0) store[bucket] = found
+  }
+
+  if (typeof publicConfig.httpProxy === 'string' && publicConfig.httpProxy) {
+    secrets.proxy = publicConfig.httpProxy
+    delete publicConfig.httpProxy
+  }
+
+  for (const [name, value] of Object.entries(publicConfig)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    if (name === 'accounts' || name === 'custom_compatible') continue
+    takeFrom(value, secrets.providers, name)
+  }
+  if (Array.isArray(publicConfig.accounts)) {
+    for (const acc of publicConfig.accounts) takeFrom(acc, secrets.accounts, String(acc?.id ?? ''))
+  }
+  if (Array.isArray(publicConfig.custom_compatible)) {
+    for (const cust of publicConfig.custom_compatible) takeFrom(cust, secrets.custom, String(cust?.id ?? ''))
+  }
+  return { publicConfig, secrets }
+}
+
+/** Put a secret bundle back into a config copy loaded from disk. */
+function mergeSecrets(config: QuotaConfig, secrets: Partial<SecretBundle> | undefined): QuotaConfig {
+  if (!secrets || typeof secrets !== 'object') return config
+  const target: any = config
+  if (typeof secrets.proxy === 'string' && secrets.proxy && !target.httpProxy) target.httpProxy = secrets.proxy
+  const restore = (obj: any, store: Record<string, Record<string, unknown>> | undefined, key: string): void => {
+    const found = store?.[key]
+    if (!found || !obj) return
+    for (const field of SECRET_STRING_KEYS) {
+      if (typeof found[field] === 'string' && !obj[field]) obj[field] = found[field]
+    }
+    // The readable half keeps non-secret oauth fields (email, expiresAt), so merge the
+    // secret half into whatever object survived instead of requiring it to be absent.
+    if (found.oauth && typeof found.oauth === 'object') obj.oauth = { ...(obj.oauth || {}), ...(found.oauth as object) }
+  }
+  for (const [name, value] of Object.entries(target)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    if (name === 'accounts' || name === 'custom_compatible') continue
+    restore(value, secrets.providers, name)
+  }
+  for (const acc of Array.isArray(target.accounts) ? target.accounts : []) restore(acc, secrets.accounts, String(acc?.id ?? ''))
+  for (const cust of Array.isArray(target.custom_compatible) ? target.custom_compatible : []) restore(cust, secrets.custom, String(cust?.id ?? ''))
+  return target
+}
+
 export class QuotaManager {
   private providers: Map<string, IQuotaProvider> = new Map()
   public oauthManager = new OAuthManager()
@@ -172,6 +300,7 @@ export class QuotaManager {
 
   private cardCache: Map<string, CacheEntry> = new Map()
   private configPath: string
+  private secretsPath: string
   private config: QuotaConfig = {}
 
   constructor() {
@@ -183,7 +312,34 @@ export class QuotaManager {
       } catch {}
     }
     this.configPath = join(dshDir, 'quota-config.json')
+    this.secretsPath = join(dshDir, 'quota-secrets.json')
     this.loadConfig()
+    this.loadSecrets()
+    // Legacy installs kept keys inside quota-config.json; split them on first boot so the
+    // readable file stops carrying secrets even before the user saves anything.
+    if (!existsSync(this.secretsPath)) {
+      try {
+        const { secrets } = splitSecrets(this.config)
+        const hasAny = Object.keys(secrets.providers).length + Object.keys(secrets.accounts).length + Object.keys(secrets.custom).length > 0
+        if (hasAny) this.persistSplit()
+      } catch {}
+    }
+  }
+
+  private loadSecrets(): void {
+    try {
+      if (!existsSync(this.secretsPath)) return
+      const raw = readFileSync(this.secretsPath, 'utf8')
+      const parsed = JSON.parse(raw) as { version?: number; secrets?: Partial<SecretBundle> }
+      this.config = mergeSecrets(this.config, parsed?.secrets)
+    } catch {}
+  }
+
+  /** Persist the secret half first, then the secret-free config, both atomically. */
+  private persistSplit(): void {
+    const { publicConfig, secrets } = splitSecrets(this.config)
+    atomicWriteJsonSync(this.secretsPath, { version: 1, secrets }, 0o600)
+    atomicWriteJsonSync(this.configPath, publicConfig, 0o600)
   }
 
   private registerDefaultProviders(): void {
@@ -230,10 +386,10 @@ export class QuotaManager {
       } else {
         this.config = {
           deepseek: { enabled: true },
-          cursor: { enabled: true, autoDetectLocal: true },
-          antigravity: { enabled: true, autoDetectLocal: true },
-          codex: { enabled: true, autoDetectLocal: true },
-          github_copilot: { enabled: true, autoDetectLocal: true },
+          cursor: { enabled: true, autoDetectLocal: false },
+          antigravity: { enabled: true, autoDetectLocal: false },
+          codex: { enabled: true, autoDetectLocal: false },
+          github_copilot: { enabled: true, autoDetectLocal: false },
           openai_billing: { enabled: false },
           claude: { enabled: false },
           kimi: { enabled: false },
@@ -252,12 +408,17 @@ export class QuotaManager {
         this.saveConfig(this.config)
       }
     } catch {
+      // Keep the unreadable file instead of silently overwriting it on the next save.
+      try {
+        const quarantine = `${this.configPath}.corrupt-${Date.now()}`
+        renameSync(this.configPath, quarantine)
+      } catch {}
       this.config = {
         deepseek: { enabled: true },
-        cursor: { enabled: true, autoDetectLocal: true },
-        antigravity: { enabled: true, autoDetectLocal: true },
-        codex: { enabled: true, autoDetectLocal: true },
-        github_copilot: { enabled: true, autoDetectLocal: true },
+        cursor: { enabled: true, autoDetectLocal: false },
+        antigravity: { enabled: true, autoDetectLocal: false },
+        codex: { enabled: true, autoDetectLocal: false },
+        github_copilot: { enabled: true, autoDetectLocal: false },
         opencode_go: { enabled: true },
         enabledProviders: ['deepseek', 'antigravity', 'cursor', 'codex', 'github_copilot', 'opencode_go'],
         providerOrder: DEFAULT_PROVIDER_ORDER,
@@ -272,33 +433,36 @@ export class QuotaManager {
 
   saveConfig(newConfig: QuotaConfig): void {
     const current = this.config || {}
+    const unmasked = restoreMaskedSecrets(newConfig, current)
     const merged: QuotaConfig = {
       ...current,
-      ...newConfig,
-      deepseek: { ...current.deepseek, ...newConfig.deepseek },
-      cursor: { ...current.cursor, ...newConfig.cursor },
-      codex: { ...current.codex, ...newConfig.codex },
-      antigravity: { ...current.antigravity, ...newConfig.antigravity },
-      github_copilot: { ...current.github_copilot, ...newConfig.github_copilot },
-      openai_billing: { ...current.openai_billing, ...newConfig.openai_billing },
-      claude: { ...current.claude, ...newConfig.claude },
-      kimi: { ...current.kimi, ...newConfig.kimi },
-      glm: { ...current.glm, ...newConfig.glm },
-      minimax: { ...current.minimax, ...newConfig.minimax },
-      qwen: { ...current.qwen, ...newConfig.qwen },
-      volcengine: { ...current.volcengine, ...newConfig.volcengine },
-      siliconflow: { ...current.siliconflow, ...newConfig.siliconflow },
-      openrouter: { ...current.openrouter, ...newConfig.openrouter },
-      opencode_go: { ...current.opencode_go, ...newConfig.opencode_go },
-      custom_compatible: newConfig.custom_compatible !== undefined ? newConfig.custom_compatible : current.custom_compatible,
-      accounts: newConfig.accounts !== undefined ? newConfig.accounts : current.accounts,
-      enabledProviders: newConfig.enabledProviders !== undefined ? newConfig.enabledProviders : current.enabledProviders,
-      floatingHudProviders: newConfig.floatingHudProviders !== undefined ? newConfig.floatingHudProviders : current.floatingHudProviders,
-      floatingHudMetrics: newConfig.floatingHudMetrics !== undefined ? newConfig.floatingHudMetrics : current.floatingHudMetrics,
-      providerOrder: newConfig.providerOrder !== undefined ? newConfig.providerOrder : current.providerOrder,
+      ...unmasked,
+      proxyMode: unmasked.proxyMode !== undefined ? unmasked.proxyMode : current.proxyMode,
+      httpProxy: unmasked.httpProxy !== undefined ? unmasked.httpProxy : current.httpProxy,
+      deepseek: { ...current.deepseek, ...unmasked.deepseek },
+      cursor: { ...current.cursor, ...unmasked.cursor },
+      codex: { ...current.codex, ...unmasked.codex },
+      antigravity: { ...current.antigravity, ...unmasked.antigravity },
+      github_copilot: { ...current.github_copilot, ...unmasked.github_copilot },
+      openai_billing: { ...current.openai_billing, ...unmasked.openai_billing },
+      claude: { ...current.claude, ...unmasked.claude },
+      kimi: { ...current.kimi, ...unmasked.kimi },
+      glm: { ...current.glm, ...unmasked.glm },
+      minimax: { ...current.minimax, ...unmasked.minimax },
+      qwen: { ...current.qwen, ...unmasked.qwen },
+      volcengine: { ...current.volcengine, ...unmasked.volcengine },
+      siliconflow: { ...current.siliconflow, ...unmasked.siliconflow },
+      openrouter: { ...current.openrouter, ...unmasked.openrouter },
+      opencode_go: { ...current.opencode_go, ...unmasked.opencode_go },
+      custom_compatible: unmasked.custom_compatible !== undefined ? unmasked.custom_compatible : current.custom_compatible,
+      accounts: unmasked.accounts !== undefined ? unmasked.accounts : current.accounts,
+      enabledProviders: unmasked.enabledProviders !== undefined ? unmasked.enabledProviders : current.enabledProviders,
+      floatingHudProviders: unmasked.floatingHudProviders !== undefined ? unmasked.floatingHudProviders : current.floatingHudProviders,
+      floatingHudMetrics: unmasked.floatingHudMetrics !== undefined ? unmasked.floatingHudMetrics : current.floatingHudMetrics,
+      providerOrder: unmasked.providerOrder !== undefined ? unmasked.providerOrder : current.providerOrder,
       customNames: (() => {
-        if (newConfig.customNames === undefined) return current.customNames
-        const combined = { ...(current.customNames || {}), ...newConfig.customNames }
+        if (unmasked.customNames === undefined) return current.customNames
+        const combined = { ...(current.customNames || {}), ...unmasked.customNames }
         for (const [k, v] of Object.entries(combined)) {
           if (!v || !v.trim()) delete (combined as any)[k]
         }
@@ -308,9 +472,43 @@ export class QuotaManager {
 
     this.config = merged
     this.cardCache.clear()
-    try {
-      atomicWriteJsonSync(this.configPath, this.config, 0o600)
-    } catch {}
+    this.persistSplit()
+  }
+
+  getSafeConfig(): QuotaConfig {
+    const copy: any = JSON.parse(JSON.stringify(this.config || {}))
+    const keyProps = ['apiKey', 'sessionToken', 'token']
+    if (typeof copy.httpProxy === 'string' && copy.httpProxy) {
+      copy.httpProxy = sanitizeProxyUrl(copy.httpProxy)
+    }
+    for (const [k, v] of Object.entries(copy)) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        for (const kp of keyProps) {
+          if ((v as any)[kp]) (v as any)[kp] = maskSecret((v as any)[kp])
+        }
+        if ((v as any).oauth?.accessToken) (v as any).oauth.accessToken = maskSecret((v as any).oauth.accessToken)
+        if ((v as any).oauth?.refreshToken) (v as any).oauth.refreshToken = maskSecret((v as any).oauth.refreshToken)
+      }
+    }
+    if (Array.isArray(copy.custom_compatible)) {
+      copy.custom_compatible = copy.custom_compatible.map((item: any) => ({
+        ...item,
+        apiKey: item.apiKey ? maskSecret(item.apiKey) : '',
+      }))
+    }
+    if (Array.isArray(copy.accounts)) {
+      copy.accounts = copy.accounts.map((item: any) => ({
+        ...item,
+        apiKey: item.apiKey ? maskSecret(item.apiKey) : undefined,
+        sessionToken: item.sessionToken ? maskSecret(item.sessionToken) : undefined,
+        oauth: item.oauth ? {
+          ...item.oauth,
+          accessToken: item.oauth.accessToken ? maskSecret(item.oauth.accessToken) : undefined,
+          refreshToken: item.oauth.refreshToken ? maskSecret(item.oauth.refreshToken) : undefined,
+        } : undefined,
+      }))
+    }
+    return copy
   }
 
   getConfig(): QuotaConfig {
@@ -337,7 +535,7 @@ export class QuotaManager {
     } catch {}
   }
 
-  public buildInstanceTasks(): Array<{ id: string; providerName: string; accountConfig?: AccountConfigItem }> {
+  public buildInstanceTasks(providerFilter?: string): Array<{ id: string; providerName: string; accountConfig?: AccountConfigItem }> {
     const tasks: Array<{ id: string; providerName: string; accountConfig?: AccountConfigItem }> = []
 
     // 1. Explicit multi-accounts list
@@ -389,14 +587,18 @@ export class QuotaManager {
       }
     }
 
-    return tasks
+    if (!providerFilter) return tasks
+    const needle = providerFilter.toLowerCase()
+    return tasks.filter(t =>
+      t.providerName.toLowerCase().includes(needle) || t.id.toLowerCase().includes(needle)
+    )
   }
 
   private generateSparkline(instanceId: string, _currentRem: number): QuotaSparklinePoint[] {
     return this.historyManager.getUsageTrendPoints(instanceId, 7)
   }
 
-  async getQuotaCards(forceRefresh = false): Promise<{
+  async getQuotaCards(forceRefresh = false, providerFilter?: string): Promise<{
     cards: AuthCardItem[]
     allCards: AuthCardItem[]
     alarms: QuotaAlarm[]
@@ -406,7 +608,7 @@ export class QuotaManager {
     const ttl = Math.max(5000, intervalSec * 1000)
     const now = Date.now()
 
-    const tasks = this.buildInstanceTasks()
+    const tasks = this.buildInstanceTasks(providerFilter)
     const settled = await runWithConcurrency(tasks, async ({ id, providerName, accountConfig }) => {
       const cached = this.cardCache.get(id)
       if (!forceRefresh && cached && (now - cached.fetchedAt) < ttl) {
@@ -420,11 +622,11 @@ export class QuotaManager {
         const result = await provider.fetchCard(this.config, accountConfig)
         const card = result.card
         // Calculate burn rate & estimated hours
-        const remPercent = card.groups[0]?.windows[0]?.remainingPercent ?? 100
-        const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(id, remPercent)
+        const rep = this.representativeWindow(card)
+        const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(id, rep.remainingPercent)
         card.burnRatePerHour = burnRatePerHour
         card.estimatedHoursLeft = estimatedHoursLeft
-        card.sparkline = this.generateSparkline(id, remPercent)
+        card.sparkline = this.generateSparkline(id, rep.remainingPercent)
 
         const customName = (this.config as any)[providerName]?.name || this.config.customNames?.[id] || this.config.customNames?.[providerName]
         if (customName) {
@@ -488,6 +690,23 @@ export class QuotaManager {
     }
   }
 
+  /**
+   * Pick one window to represent a card's short-cycle trend.
+   *
+   * Index 0 is server order, which changes when a new pool (e.g. Gemini 4 Argon)
+   * appears; keeping a series on whatever happened to be first would splice two
+   * incomparable pools into one burn-rate sample. Prefer an active, non-unknown
+   * window and fall back to the first window that exists.
+   */
+  private representativeWindow(card: AuthCardItem): { remainingPercent: number; windowId?: string } {
+    const all = card.groups.flatMap(g => g.windows)
+    const preferred = all.find(w => w.status !== 'unknown' && w.status !== 'disabled' && w.remainingPercent > 0)
+      ?? all.find(w => w.status !== 'unknown' && w.status !== 'disabled')
+      ?? all[0]
+    if (!preferred) return { remainingPercent: 100 }
+    return { remainingPercent: preferred.remainingPercent, windowId: preferred.id }
+  }
+
   async refreshSingleProvider(instanceOrProvider: string): Promise<AuthCardItem | undefined> {
     const tasks = this.buildInstanceTasks()
     const task = tasks.find(t => t.id === instanceOrProvider || t.providerName === instanceOrProvider)
@@ -499,11 +718,11 @@ export class QuotaManager {
     try {
       const res = await provider.fetchCard(this.config, task.accountConfig)
       const card = res.card
-      const remPercent = card.groups[0]?.windows[0]?.remainingPercent ?? 100
-      const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(task.id, remPercent)
+      const rep = this.representativeWindow(card)
+      const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(task.id, rep.remainingPercent)
       card.burnRatePerHour = burnRatePerHour
       card.estimatedHoursLeft = estimatedHoursLeft
-      card.sparkline = this.generateSparkline(task.id, remPercent)
+      card.sparkline = this.generateSparkline(task.id, rep.remainingPercent)
 
       const customName = (this.config as any)[task.providerName]?.name || this.config.customNames?.[task.id] || this.config.customNames?.[task.providerName]
       if (customName) {
@@ -562,12 +781,10 @@ export class QuotaManager {
   }
 
   async testAllConnections(): Promise<Record<string, TestConnectionResult>> {
+    // Only instance tasks the user actually configured (provider enabled or account listed).
+    // Never append disabled providers here: probing them can read local IDE/CLI credentials
+    // the user explicitly switched off.
     const tasks = this.buildInstanceTasks()
-    for (const pName of this.providers.keys()) {
-      if (!tasks.some(t => t.id === pName || t.providerName === pName)) {
-        tasks.push({ id: pName, providerName: pName })
-      }
-    }
     const results: Record<string, TestConnectionResult> = {}
 
     await runWithConcurrency(tasks, async (t) => {
@@ -583,7 +800,7 @@ export class QuotaManager {
    * Structured summary and intelligent model routing recommendations for DSH Agent Tool calls
    */
   async getAgentQuotaSummary(providerName?: string, forceRefresh = false): Promise<any> {
-    const { cards, alarms, lastUpdated } = await this.getQuotaCards(forceRefresh)
+    const { cards, alarms, lastUpdated } = await this.getQuotaCards(forceRefresh, providerName)
     const targetCards = providerName
       ? cards.filter(c => c.provider.toLowerCase().includes(providerName.toLowerCase()) || c.id.toLowerCase().includes(providerName.toLowerCase()))
       : cards

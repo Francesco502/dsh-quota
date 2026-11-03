@@ -26,12 +26,14 @@ export class ClaudeProvider implements IQuotaProvider {
 
     try {
       const res = await fetchWithProxy(`${baseUrl}/v1/models`, {
+        method: 'GET',
         headers: {
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
           Accept: 'application/json',
         },
-      }, config.httpProxy, 10000)
+        redirect: 'error',
+      }, config.httpProxy, 10000, config.proxyMode)
 
       const latencyMs = Date.now() - start
       if (res.ok || res.status === 200) {
@@ -82,12 +84,14 @@ export class ClaudeProvider implements IQuotaProvider {
 
     try {
       const res = await fetchWithProxy(`${baseUrl}/v1/models`, {
+        method: 'GET',
         headers: {
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
           Accept: 'application/json',
         },
-      }, config.httpProxy, 10000)
+        redirect: 'error',
+      }, config.httpProxy, 10000, config.proxyMode)
 
       if (!res.ok) {
         throw new Error(`Claude API 验证失败 (${res.status})`)

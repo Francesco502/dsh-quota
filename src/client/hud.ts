@@ -478,6 +478,8 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
     const popoverRows = metrics.map(m => {
       const color = getStatusColor(m.remainingPercent)
+      // Card/group/window text is escaped once at the controller boundary; escaping again here
+      // would render visible entities (`&amp;`).
       return `
         <div class="dsh-hud-popover-row">
           <span class="dsh-hud-popover-name" title="${m.name}">${m.name}</span>

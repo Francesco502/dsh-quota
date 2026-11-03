@@ -103,7 +103,7 @@ export class OpenAIBillingProvider implements IQuotaProvider {
 
       const subtitle = hasBilling && hardLimit > 0
         ? `总限额: $${hardLimit.toFixed(2)} USD`
-        : 'API Key 有效 · 额度正常'
+        : 'API Key 有效 · 官方未开放余额查询'
 
       return {
         card: {
@@ -111,12 +111,15 @@ export class OpenAIBillingProvider implements IQuotaProvider {
           name: cardName,
           provider: 'openai_billing',
           category: this.category,
-          status: remPercent <= 15 ? 'warn' : 'ok',
+          status: hasBilling && remPercent <= 15 ? 'warn' : 'ok',
           plan: 'OpenAI API',
           balance: hasBilling ? { currency: 'USD', total: hardLimit, remaining: hardLimit - totalUsage } : undefined,
           groups: [
             {
+              id: 'openai-billing-group',
               title: 'OpenAI 额度监控',
+              hasInfoIcon: true,
+              poolType: 'general',
               windows: [
                 {
                   id: 'openai-api-limit',
@@ -125,11 +128,18 @@ export class OpenAIBillingProvider implements IQuotaProvider {
                   usedPercent,
                   remainingPercent: remPercent,
                   barType: 'circle',
+                  status: hasBilling ? (remPercent <= 0 ? 'exhausted' : 'active') : 'unknown',
                 },
               ],
             },
           ],
           lastUpdated: Date.now(),
+          sourceProvenance: {
+            endpoint: `${baseUrl}/v1/models`,
+            method: 'oauth-api',
+            timestamp: Date.now(),
+            host: 'api.openai.com',
+          },
         },
       }
     } catch (err: any) {

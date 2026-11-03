@@ -13,6 +13,26 @@ interface OAuthTokenInfo {
   name?: string
 }
 
+function getPlatformTag(): string {
+  switch (process.platform) {
+    case 'win32': return 'windows'
+    case 'darwin': return 'darwin'
+    default: return 'linux'
+  }
+}
+
+function getArchTag(): string {
+  if (process.arch === 'x64') return 'amd64'
+  if (process.arch === 'arm64') return 'arm64'
+  return process.arch
+}
+
+export const HUB_CLIENT_MIN_VERSION = '2.26.0'
+
+export function buildHubUserAgent(version = HUB_CLIENT_MIN_VERSION): string {
+  return `antigravity/hub/${version} (aidev_client; os_type=${getPlatformTag()}; arch=${getArchTag()})`
+}
+
 function readVarint(data: Buffer, start: number): { value: number; next: number } {
   let value = 0, shift = 0, index = start
   while (index < data.length) {
@@ -131,7 +151,7 @@ export class AntigravityProvider implements IQuotaProvider {
     return null
   }
 
-  private async activeToken(token: OAuthTokenInfo, config: QuotaConfig): Promise<string> {
+  private async activeToken(token: OAuthTokenInfo, config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<string> {
     if (token.accessToken && (!token.expiry || token.expiry * 1000 > Date.now() + 60_000)) {
       return token.accessToken
     }
@@ -152,7 +172,7 @@ export class AntigravityProvider implements IQuotaProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
-    }, config.httpProxy, 15000)
+    }, config.httpProxy, 15000, config.proxyMode)
 
     if (!res.ok) {
       const errText = await res.text()
@@ -169,7 +189,10 @@ export class AntigravityProvider implements IQuotaProvider {
     token.accessToken = newAccessToken
     token.expiry = Math.floor(expiresAt / 1000)
 
-    if (config.antigravity?.oauth) {
+    if (accountConfig?.oauth) {
+      accountConfig.oauth.accessToken = newAccessToken
+      accountConfig.oauth.expiresAt = expiresAt
+    } else if (config.antigravity?.oauth) {
       config.antigravity.oauth.accessToken = newAccessToken
       config.antigravity.oauth.expiresAt = expiresAt
     }
@@ -189,25 +212,34 @@ export class AntigravityProvider implements IQuotaProvider {
     }
 
     try {
-      const accessToken = await this.activeToken(tokenInfo, config)
+      const accessToken = await this.activeToken(tokenInfo, config, accountConfig)
+      const hubUa = buildHubUserAgent()
       const res = await fetchWithProxy('https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
-          'User-Agent': 'antigravity',
+          'User-Agent': hubUa,
+          'X-Goog-Api-Client': 'antigravity',
         },
         body: '{}',
-      }, config.httpProxy, 10000)
+      }, config.httpProxy, 10000, config.proxyMode)
 
       const latencyMs = Date.now() - start
-      if (res.ok || res.status === 200) {
+      if (res.ok) {
+        const data = await res.json() as any
+        const groupCount = Array.isArray(data?.groups) ? data.groups.length : 0
+        const hasArgon = (data?.groups || []).some((g: any) =>
+          (g.displayName || '').toLowerCase().includes('argon') || (g.displayName || '').toLowerCase().includes('gemini 4')
+        )
+        const accountDesc = tokenInfo.email || config.antigravity?.oauth?.email || '已连接'
+        const poolSummary = hasArgon ? '已获取全部额度池 (包含 Gemini 4 Argon)' : `已连接 (${groupCount} 个额度分组)`
         return {
           ok: true,
           provider: 'antigravity',
           latencyMs,
-          account: tokenInfo.email || 'Google Account',
-          message: `连接成功 (延迟: ${latencyMs}ms)`,
+          account: accountDesc,
+          message: `连接成功 (延迟: ${latencyMs}ms, ${poolSummary})`,
         }
       }
 
@@ -215,21 +247,21 @@ export class AntigravityProvider implements IQuotaProvider {
         ok: false,
         provider: 'antigravity',
         latencyMs,
-        message: `接口响应异常: HTTP ${res.status}`,
+        message: `HTTP 响应状态码异常 (${res.status})`,
       }
     } catch (err: any) {
       return {
         ok: false,
         provider: 'antigravity',
         latencyMs: Date.now() - start,
-        message: `连接失败: ${err.message}`,
+        message: `网络连接异常: ${err.message}`,
       }
     }
   }
 
   async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'antigravity'
-    const cardName = accountConfig?.name || 'Google Antigravity'
+    const cardName = accountConfig?.name || config.customNames?.antigravity || config.antigravity?.name || 'Google Antigravity'
     const tokenInfo = this.loadToken(config, accountConfig)
 
     if (!tokenInfo) {
@@ -248,7 +280,7 @@ export class AntigravityProvider implements IQuotaProvider {
     }
 
     try {
-      const accessToken = await this.activeToken(tokenInfo, config)
+      const accessToken = await this.activeToken(tokenInfo, config, accountConfig)
 
       // Try fetching profile if email is not known
       let accountEmail = tokenInfo.email || config.antigravity?.oauth?.email
@@ -256,11 +288,14 @@ export class AntigravityProvider implements IQuotaProvider {
         try {
           const infoRes = await fetchWithProxy('https://www.googleapis.com/oauth2/v2/userinfo', {
             headers: { Authorization: `Bearer ${accessToken}` },
-          }, config.httpProxy, 8000)
+          }, config.httpProxy, 8000, config.proxyMode)
           if (infoRes.ok) {
             const info = await infoRes.json() as any
             accountEmail = info.email
-            if (config.antigravity?.oauth) {
+            if (accountConfig?.oauth) {
+              accountConfig.oauth.email = info.email
+              accountConfig.oauth.name = info.name
+            } else if (config.antigravity?.oauth) {
               config.antigravity.oauth.email = info.email
               config.antigravity.oauth.name = info.name
             }
@@ -275,6 +310,8 @@ export class AntigravityProvider implements IQuotaProvider {
 
       let summaryData: any = null
       let lastFetchErr = ''
+      let successfulEndpoint = ''
+      const hubUa = buildHubUserAgent()
 
       for (const endpoint of summaryEndpoints) {
         try {
@@ -283,14 +320,15 @@ export class AntigravityProvider implements IQuotaProvider {
             headers: {
               Authorization: `Bearer ${accessToken}`,
               'Content-Type': 'application/json',
-              'User-Agent': 'antigravity',
+              'User-Agent': hubUa,
               'X-Goog-Api-Client': 'antigravity',
             },
             body: '{}',
-          }, config.httpProxy, 15000)
+          }, config.httpProxy, 15000, config.proxyMode)
 
           if (res.ok) {
             summaryData = await res.json()
+            successfulEndpoint = endpoint
             break
           } else {
             lastFetchErr = `HTTP ${res.status}`
@@ -301,48 +339,64 @@ export class AntigravityProvider implements IQuotaProvider {
       }
 
       const groups: MetricGroup[] = []
+      let hasArgonPool = false
 
       if (summaryData?.groups && Array.isArray(summaryData.groups)) {
         for (const g of summaryData.groups) {
           const windows: MetricWindow[] = []
-          const isGemini = (g.displayName || '').toLowerCase().includes('gemini')
-          const isClaude = (g.displayName || '').toLowerCase().includes('claude') || (g.displayName || '').toLowerCase().includes('gpt')
-          for (const b of (g.buckets || [])) {
-            const frac = b.remainingFraction ?? 1.0
-            const rem = Math.max(0, Math.min(100, Math.round(frac * 100)))
-            const isWeekly = b.window === 'WINDOW_WEEKLY' || (b.displayName && b.displayName.toLowerCase().includes('weekly'))
-            const subtitle = formatQuotaResetText(b.resetTime, 100 - rem, Boolean(isWeekly))
+          const nameLower = (g.displayName || '').toLowerCase()
+          const isArgon = nameLower.includes('argon') || nameLower.includes('gemini 4')
+          const isGemini = !isArgon && nameLower.includes('gemini')
+          const isClaude = nameLower.includes('claude') || nameLower.includes('gpt')
+          const poolType = isArgon ? 'argon' : (isGemini ? 'gemini' : (isClaude ? 'claude_gpt' : 'general'))
+          if (isArgon) hasArgonPool = true
 
-            let winId = b.bucketId || b.displayName || (isWeekly ? 'weekly' : '5h')
-            if (isGemini) {
-              winId = isWeekly ? 'gemini-weekly' : 'gemini-5h'
-            } else if (isClaude) {
-              winId = isWeekly ? 'claude-weekly' : 'claude-5h'
-            }
+          for (const b of (g.buckets || [])) {
+            const frac = typeof b.remainingFraction === 'number' ? b.remainingFraction : (b.remainingFraction !== undefined ? Number(b.remainingFraction) : undefined)
+            const hasFrac = frac !== undefined && !isNaN(frac)
+            const rem = hasFrac ? Math.max(0, Math.min(100, Math.round(frac * 100))) : 0
+            const isWeekly = b.window === 'WINDOW_WEEKLY' || (b.displayName && b.displayName.toLowerCase().includes('weekly')) || (b.bucketId && b.bucketId.toLowerCase().includes('weekly'))
+            const is5Hour = b.window === 'WINDOW_5_HOUR' || b.window === 'WINDOW_5H' || (b.displayName && (b.displayName.toLowerCase().includes('5h') || b.displayName.toLowerCase().includes('five')))
+            const windowKind = isWeekly ? 'weekly' : (is5Hour ? '5h' : 'unknown')
+
+            let winId = b.bucketId || (isArgon ? 'argon-weekly' : (isGemini ? (isWeekly ? 'gemini-weekly' : 'gemini-5h') : (isClaude ? (isWeekly ? 'claude-weekly' : 'claude-5h') : (isWeekly ? 'weekly' : '5h'))))
+
+            const status = !hasFrac ? 'unknown' : (rem <= 0 ? 'exhausted' : 'active')
+            const label = isWeekly ? (isArgon ? 'Weekly Limit (Argon)' : 'Weekly Limit') : (is5Hour ? '5-Hour Limit' : (b.displayName || 'Quota Limit'))
+            const subtitle = hasFrac ? formatQuotaResetText(b.resetTime, 100 - rem, Boolean(isWeekly)) : '额度状态未知'
 
             if (!windows.some(w => w.id === winId)) {
               windows.push({
                 id: winId,
-                label: isWeekly ? 'Weekly Limit' : '5-Hour Limit',
+                label,
                 subtitle,
                 usedPercent: 100 - rem,
                 remainingPercent: rem,
                 resetAt: b.resetTime,
                 barType: 'circle',
+                status,
+                rawFraction: frac,
+                windowKind,
+                bucketId: b.bucketId,
+                modelFamily: isArgon ? 'gemini-4-argon' : (isGemini ? 'gemini' : (isClaude ? 'claude' : undefined)),
               })
             }
           }
+
           if (windows.length > 0) {
+            const title = isArgon ? 'Gemini 4 Argon' : (g.displayName || (isGemini ? 'Gemini Models' : (isClaude ? 'Claude and GPT models' : 'Model Quotas')))
             groups.push({
-              title: g.displayName || (isGemini ? 'Gemini Models' : (isClaude ? 'Claude and GPT models' : 'Model Quotas')),
+              id: `antigravity-pool-${poolType}`,
+              title,
               hasInfoIcon: true,
+              poolType,
               windows,
             })
           }
         }
       }
 
-      // Fallback endpoint
+      // Fallback endpoint if retrieveUserQuotaSummary is empty
       if (groups.length === 0) {
         const modelEndpoints = [
           'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
@@ -360,9 +414,10 @@ export class AntigravityProvider implements IQuotaProvider {
                 'X-Goog-Api-Client': 'antigravity',
               },
               body: '{}',
-            }, config.httpProxy, 15000)
+            }, config.httpProxy, 15000, config.proxyMode)
             if (res.ok) {
               modelData = await res.json()
+              successfulEndpoint = endpoint
               break
             }
           } catch {}
@@ -371,6 +426,7 @@ export class AntigravityProvider implements IQuotaProvider {
         if (modelData?.models) {
           const geminiWindows: MetricWindow[] = []
           const claudeGptWindows: MetricWindow[] = []
+          const argonWindows: MetricWindow[] = []
 
           for (const [id, model] of Object.entries(modelData.models) as Array<[string, any]>) {
             const quota = model?.quotaInfo
@@ -378,14 +434,18 @@ export class AntigravityProvider implements IQuotaProvider {
             const rem = Math.max(0, Math.min(100, Math.round(quota.remainingFraction * 100)))
             const isWeekly = id.toLowerCase().includes('weekly') || (model.displayName && model.displayName.toLowerCase().includes('weekly'))
             const is5Hour = id.toLowerCase().includes('five') || id.toLowerCase().includes('5hour') || (model.displayName && model.displayName.toLowerCase().includes('five'))
-            const cleanLabel = isWeekly ? 'Weekly Limit' : is5Hour ? '5-Hour Limit' : (model.displayName || id)
+            const isArgon = id.toLowerCase().includes('argon') || (model.displayName && model.displayName.toLowerCase().includes('argon'))
+            const isGemini = !isArgon && id.toLowerCase().includes('gemini')
+            const cleanLabel = isWeekly ? (isArgon ? 'Weekly Limit (Argon)' : 'Weekly Limit') : is5Hour ? '5-Hour Limit' : (model.displayName || id)
             const subtitle = formatQuotaResetText(quota.resetTime, 100 - rem, Boolean(isWeekly))
-            const isGemini = id.toLowerCase().includes('gemini')
-            const winId = isGemini
-              ? (isWeekly ? 'gemini-weekly' : 'gemini-5h')
-              : (isWeekly ? 'claude-weekly' : 'claude-5h')
+            
+            const winId = isArgon
+              ? (isWeekly ? 'argon-weekly' : 'argon-5h')
+              : isGemini
+                ? (isWeekly ? 'gemini-weekly' : 'gemini-5h')
+                : (isWeekly ? 'claude-weekly' : 'claude-5h')
 
-            const targetList = isGemini ? geminiWindows : claudeGptWindows
+            const targetList = isArgon ? argonWindows : (isGemini ? geminiWindows : claudeGptWindows)
             if (!targetList.some(w => w.id === winId)) {
               targetList.push({
                 id: winId,
@@ -395,12 +455,21 @@ export class AntigravityProvider implements IQuotaProvider {
                 remainingPercent: rem,
                 resetAt: quota.resetTime,
                 barType: 'circle',
+                status: rem <= 0 ? 'exhausted' : 'active',
+                rawFraction: quota.remainingFraction,
+                windowKind: isWeekly ? 'weekly' : (is5Hour ? '5h' : 'unknown'),
+                bucketId: id,
+                modelFamily: isArgon ? 'gemini-4-argon' : (isGemini ? 'gemini' : 'claude'),
               })
             }
           }
 
-          if (geminiWindows.length > 0) groups.push({ title: 'Gemini Models', hasInfoIcon: true, windows: geminiWindows })
-          if (claudeGptWindows.length > 0) groups.push({ title: 'Claude and GPT models', hasInfoIcon: true, windows: claudeGptWindows })
+          if (geminiWindows.length > 0) groups.push({ id: 'antigravity-pool-gemini', title: 'Gemini Models', poolType: 'gemini', hasInfoIcon: true, windows: geminiWindows })
+          if (claudeGptWindows.length > 0) groups.push({ id: 'antigravity-pool-claude', title: 'Claude and GPT models', poolType: 'claude_gpt', hasInfoIcon: true, windows: claudeGptWindows })
+          if (argonWindows.length > 0) {
+            groups.push({ id: 'antigravity-pool-argon', title: 'Gemini 4 Argon', poolType: 'argon', hasInfoIcon: true, windows: argonWindows })
+            hasArgonPool = true
+          }
         }
       }
 
@@ -408,17 +477,37 @@ export class AntigravityProvider implements IQuotaProvider {
         throw new Error(`无法获取额度明细 (${lastFetchErr})。若处于受限网络，请在设置中配置 HTTP 代理。`)
       }
 
+      // Overall card status describes reachability and pressure, never "exhausted":
+      // `error` is reserved for failed collection so the alarm layer cannot report a
+      // quota-exhausted account as "connection failed / credential invalid".
+      const allWindows = groups.flatMap(g => g.windows)
+      const isAnyLow = allWindows.some(w => w.remainingPercent > 0 && w.remainingPercent <= (config.alarmThresholdPercent ?? 15))
+      const isAllExhausted = allWindows.length > 0 && allWindows.every(w => w.remainingPercent <= 0)
+      const cardStatus = allWindows.length === 0 ? 'ok' : (isAnyLow || isAllExhausted ? 'warn' : 'ok')
+      // Never guess the subscription tier: Argon presence is a quota-group fact, not a plan name.
+      const planName = summaryData?.plan || undefined
+      // Partial only when a degraded branch produced the numbers; a 2-group Ultra account
+      // is a complete answer, not a partial one.
+      const usedFallback = groups.length > 0 && !Array.isArray(summaryData?.groups)
+
       return {
         card: {
           id: cardId,
           name: cardName,
           provider: 'antigravity',
           category: this.category,
-          status: 'ok',
-          plan: 'Antigravity Pro',
+          status: cardStatus,
+          plan: planName,
           account: accountEmail,
           groups,
           lastUpdated: Date.now(),
+          sourceProvenance: {
+            endpoint: successfulEndpoint,
+            method: usedFallback ? 'model-fallback' : 'official-summary',
+            timestamp: Date.now(),
+            partial: usedFallback,
+            host: successfulEndpoint ? new URL(successfulEndpoint).hostname : undefined,
+          },
         },
       }
     } catch (err: any) {

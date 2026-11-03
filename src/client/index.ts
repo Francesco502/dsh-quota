@@ -1,7 +1,7 @@
 /**
  * Client entry for dsh-quota Web UI.
  * @package dsh-quota
- * @version 0.3.1
+ * @version 0.4.0
  */
 import { QuotaClientApi } from './api.ts'
 import { QuotaController } from './controller.ts'
@@ -9,7 +9,7 @@ import { mountQuotaSidebarEntry } from './sidebar-entry.ts'
 import { mountPanel } from './mount.ts'
 import { mountQuotaHud } from './hud.ts'
 
-export const VERSION = '0.3.1'
+export const VERSION = '0.4.0'
 export const inject: string[] = []
 
 let applied = false
@@ -41,13 +41,7 @@ export function apply(ctx: any): void {
       }, 'quota: client cleanup')
     }
   } catch (err) {
+    applied = false
     console.error('[dsh-quota] client mount error:', err)
   }
-}
-
-// Immediate execution fallback in case ctx.apply isn't triggered by cordis runner immediately
-if (typeof window !== 'undefined') {
-  setTimeout(() => {
-    apply({})
-  }, 500)
 }

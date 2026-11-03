@@ -1,4 +1,5 @@
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
+export type ProxyMode = 'direct' | 'proxy-required' | 'proxy-preferred'
 
 export interface MetricWindow {
   id: string
@@ -7,7 +8,14 @@ export interface MetricWindow {
   usedPercent: number
   remainingPercent: number
   resetAt?: string
-  barType?: 'circle' | 'line'
+  barType?: 'circle' | 'line' | 'balance'
+  status?: 'active' | 'disabled' | 'unknown' | 'exhausted'
+  rawFraction?: number
+  windowKind?: '5h' | 'weekly' | 'monthly' | 'sliding' | 'unknown'
+  bucketId?: string
+  modelFamily?: string
+  /** Truthful amount for balance-only windows; never derive a percentage from it. */
+  amountText?: string
 }
 
 export function makeHudMetricKey(provider: string, groupTitle: string, windowId: string): string {
@@ -15,8 +23,10 @@ export function makeHudMetricKey(provider: string, groupTitle: string, windowId:
 }
 
 export interface MetricGroup {
+  id?: string
   title: string
   hasInfoIcon?: boolean
+  poolType?: 'gemini' | 'argon' | 'claude_gpt' | 'custom' | 'general'
   windows: MetricWindow[]
 }
 
@@ -28,11 +38,20 @@ export interface QuotaBalanceInfo {
   grantedBalance?: number
   toppedUpBalance?: number
   expireTime?: string
+  isEstimate?: boolean
 }
 
 export interface QuotaSparklinePoint {
   t: number
   r: number
+}
+
+export interface SourceProvenance {
+  endpoint?: string
+  method?: 'official-summary' | 'model-fallback' | 'local-state' | 'oauth-api' | 'user-balance'
+  timestamp: number
+  partial?: boolean
+  host?: string
 }
 
 export interface AuthCardItem {
@@ -50,12 +69,16 @@ export interface AuthCardItem {
   estimatedHoursLeft?: number
   sparkline?: QuotaSparklinePoint[]
   lastUpdated: number
+  stale?: boolean
+  sourceProvenance?: SourceProvenance
 }
 
 export interface QuotaAlarm {
   instanceId: string
   provider: string
   name: string
+  poolId?: string
+  windowId?: string
   level: 'warn' | 'critical'
   message: string
   timestamp: number
@@ -73,9 +96,13 @@ export interface TestConnectionResult {
 export interface QuotaHistoryPoint {
   timestamp: number
   instanceId: string
+  poolId?: string
+  windowId?: string
+  windowKind?: string
   remainingPercent: number
   usedPercent: number
   remainingBalance?: number
+  resetAt?: string
 }
 
 export interface AccountConfigItem {
@@ -101,7 +128,9 @@ export interface CustomCompatibleEndpoint {
 }
 
 export interface QuotaConfig {
+  schemaVersion?: number
   httpProxy?: string
+  proxyMode?: ProxyMode
   enabledProviders?: string[]
   floatingHudProviders?: string[]
   providerOrder?: string[]
@@ -116,7 +145,7 @@ export interface QuotaConfig {
   custom_compatible?: CustomCompatibleEndpoint[]
   deepseek?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
   cursor?: { enabled?: boolean; autoDetectLocal?: boolean; sessionToken?: string; name?: string }
-  codex?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string }
+  codex?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string; syncLocalAuth?: boolean }
   antigravity?: { enabled?: boolean; autoDetectLocal?: boolean; oauth?: any; name?: string }
   opencode_go?: { enabled?: boolean; apiKey?: string; baseUrl?: string; name?: string }
   github_copilot?: { enabled?: boolean; token?: string; autoDetectLocal?: boolean; name?: string }
@@ -140,6 +169,43 @@ export function getRefreshIntervalSeconds(config?: QuotaConfig): number {
     return Math.max(5, Math.round(config.refreshIntervalMinutes * 60))
   }
   return 60
+}
+
+/** Encode text for safe interpolation into view markup. */
+export function escapeHtmlText(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * Escape server- and response-derived card text once, at the boundary.
+ *
+ * The panel composes long-lived markup with these strings; escaping here keeps
+ * remote values (account e-mail, upstream error bodies, upstream group labels)
+ * from reaching innerHTML unescaped, without touching user-owned labels twice.
+ */
+export function escapeCardText(card: AuthCardItem): AuthCardItem {
+  return {
+    ...card,
+    name: escapeHtmlText(card.name),
+    plan: card.plan === undefined ? undefined : escapeHtmlText(card.plan),
+    account: card.account === undefined ? undefined : escapeHtmlText(card.account),
+    error: card.error === undefined ? undefined : escapeHtmlText(card.error),
+    groups: (card.groups || []).map(group => ({
+      ...group,
+      title: escapeHtmlText(group.title),
+      windows: (group.windows || []).map(win => ({
+        ...win,
+        label: escapeHtmlText(win.label),
+        subtitle: win.subtitle === undefined ? undefined : escapeHtmlText(win.subtitle),
+      })),
+    })),
+  }
 }
 
 export class QuotaClientApi {
