@@ -471,6 +471,16 @@ try {
   const quarantined = readdirSync(splitDir).filter(f => f.includes('.corrupt-'))
   assert.ok(quarantined.length >= 1, 'corrupt config must be preserved for inspection')
   console.log('✓ corrupt config quarantined, not overwritten')
+
+  // 26. OAuth tokens survive the split while non-secret oauth fields stay readable
+  const oauthMgr = new QuotaManager()
+  oauthMgr.saveConfig({ antigravity: { enabled: true, oauth: { accessToken: 'ya29.regression', refreshToken: '1//r', email: 'x@y.z', expiresAt: 42 } } })
+  const oauthReload = new QuotaManager()
+  assert.equal(oauthReload.getConfig().antigravity?.oauth?.accessToken, 'ya29.regression', 'oauth access token must reload from the secrets file')
+  assert.equal(oauthReload.getConfig().antigravity?.oauth?.email, 'x@y.z', 'non-secret oauth fields stay in the readable config')
+  const oauthPublic = readFileSyncTest(join(process.env.DSH_HOME, 'quota-config.json'), 'utf8')
+  assert.ok(!oauthPublic.includes('ya29.regression'), 'oauth token must not remain in the readable config')
+  console.log('✓ oauth tokens split out and restored on boot')
 } finally {
   await new Promise((resolve) => testServer.close(resolve))
 }

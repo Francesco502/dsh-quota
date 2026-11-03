@@ -270,7 +270,9 @@ function mergeSecrets(config: QuotaConfig, secrets: Partial<SecretBundle> | unde
     for (const field of SECRET_STRING_KEYS) {
       if (typeof found[field] === 'string' && !obj[field]) obj[field] = found[field]
     }
-    if (found.oauth && typeof found.oauth === 'object' && !obj.oauth) obj.oauth = { ...(found.oauth as object) }
+    // The readable half keeps non-secret oauth fields (email, expiresAt), so merge the
+    // secret half into whatever object survived instead of requiring it to be absent.
+    if (found.oauth && typeof found.oauth === 'object') obj.oauth = { ...(obj.oauth || {}), ...(found.oauth as object) }
   }
   for (const [name, value] of Object.entries(target)) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue
