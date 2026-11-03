@@ -132,7 +132,9 @@ export class DeepSeekProvider implements IQuotaProvider {
 
       const totalAmount = Math.max(0, totalBalance)
       const isLow = totalAmount <= 5
-      const status = !isAvailable || totalAmount <= 0 ? 'error' : (isLow ? 'warn' : 'ok')
+      // `error` is reserved for an unavailable account (401/403/network), never for a
+      // zero balance — that is a warning the alarm layer reports as "余额不足".
+      const status = !isAvailable ? 'error' : (isLow ? 'warn' : 'ok')
       const remPercent = totalAmount <= 0 ? 0 : (totalAmount < 5 ? 15 : (totalAmount < 20 ? 40 : 100))
       const usedPercent = 100 - remPercent
 

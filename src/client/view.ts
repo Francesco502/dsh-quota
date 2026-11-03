@@ -2095,7 +2095,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
               </span>
               <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.05));">
                 <button type="button" class="quota-btn secondary" id="btn-export-safe">导出脱敏备份</button>
-                <button type="button" class="quota-btn secondary" id="btn-export-full">完整配置导出</button>
+                <button type="button" class="quota-btn secondary" id="btn-export-full">导出完整结构 (凭据仍脱敏)</button>
                 <button type="button" class="quota-btn secondary" id="btn-import-config">导入配置文件</button>
                 <input type="file" id="input-import-file" accept=".json" style="display: none;" />
               </div>
@@ -2192,7 +2192,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div class="quota-header">
           <div class="quota-title">
             <span>AI 额度监控</span>
-            <span class="quota-version-tag">v0.3.1</span>
+            <span class="quota-version-tag">v0.4.0</span>
             ${state.loading ? '<span style="font-size: 12px; font-weight: normal; color: var(--dsw-alias-brand-primary, #0969da); margin-left: 8px;">正在刷新...</span>' : ''}
           </div>
           <div style="display: flex; gap: 10px; align-items: center;">
@@ -2593,8 +2593,10 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
 
     container.querySelector('#btn-export-full')?.addEventListener('click', () => {
       const cfg = controller.getSnapshot().config || {}
+      // The browser only ever receives the masked DTO (GET /config), so this export can
+      // never contain live secrets; say so instead of promising a credential backup.
       downloadJsonFile(`dsh-quota-config-backup-${new Date().toISOString().slice(0, 10)}.json`, cfg)
-      showToast('已导出完整配置文件 (含凭据)', 'info')
+      showToast('已导出完整配置结构（凭据已脱敏，不能用于恢复密钥）', 'info')
     })
 
     container.querySelector('#btn-import-config')?.addEventListener('click', () => {

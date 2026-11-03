@@ -169,6 +169,51 @@ export function getRefreshIntervalSeconds(config?: QuotaConfig): number {
   return 60
 }
 
+/** Encode text for safe interpolation into view markup. */
+export function escapeHtmlText(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * Escape server- and response-derived card text once, at the boundary.
+ *
+ * The panel composes long-lived markup with these strings; escaping here keeps
+ * remote values (account e-mail, upstream error bodies, upstream group labels)
+ * from reaching innerHTML unescaped, without touching user-owned labels twice.
+ */
+export function escapeCardText(card: AuthCardItem): AuthCardItem {
+  return {
+    ...card,
+    name: escapeHtmlText(card.name),
+    plan: card.plan === undefined ? undefined : escapeHtmlText(card.plan),
+    account: card.account === undefined ? undefined : escapeHtmlText(card.account),
+    error: card.error === undefined ? undefined : escapeHtmlText(card.error),
+    groups: (card.groups || []).map(group => ({
+      ...group,
+      title: escapeHtmlText(group.title),
+      windows: (group.windows || []).map(win => ({
+        ...win,
+        label: escapeHtmlText(win.label),
+        subtitle: win.subtitle === undefined ? undefined : escapeHtmlText(win.subtitle),
+      })),
+    })),
+  }
+}
+
+export function escapeAlarmText(alarm: QuotaAlarm): QuotaAlarm {
+  return {
+    ...alarm,
+    name: escapeHtmlText(alarm.name),
+    message: escapeHtmlText(alarm.message),
+  }
+}
+
 export class QuotaClientApi {
   async getCards(force = false): Promise<{
     cards: AuthCardItem[]

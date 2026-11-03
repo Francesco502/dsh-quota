@@ -1,5 +1,5 @@
 import type { AuthCardItem, QuotaConfig, QuotaClientApi, QuotaAlarm, ProviderCategory, TestConnectionResult, QuotaHistoryPoint, AccountConfigItem } from './api.ts'
-import { getRefreshIntervalSeconds } from './api.ts'
+import { getRefreshIntervalSeconds, escapeCardText, escapeAlarmText } from './api.ts'
 
 export type Listener = () => void
 
@@ -283,9 +283,9 @@ export class QuotaController {
     }
     try {
       const data = await this.api.getCards(force)
-      this.cards = data.cards
-      this.allCards = data.allCards || data.cards
-      this.alarms = data.alarms || []
+      this.cards = (data.cards || []).map(escapeCardText)
+      this.allCards = (data.allCards || data.cards || []).map(escapeCardText)
+      this.alarms = (data.alarms || []).map(escapeAlarmText)
       this.lastUpdated = data.lastUpdated
       this.triggerDesktopNotification(this.alarms)
       if (silent) {

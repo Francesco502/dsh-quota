@@ -19,6 +19,7 @@ import { CustomApiProvider } from '../providers/custom-api.ts'
 import { OAuthManager } from './oauth.ts'
 import { QuotaHistoryManager } from './history.ts'
 import { QuotaAlarmDetector } from './alarm.ts'
+import { sanitizeProxyUrl } from './fetch.ts'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -175,6 +176,19 @@ function restoreMaskedSecrets(incoming: any, existing: any): any {
   if (!incoming || typeof incoming !== 'object') return incoming
   if (!existing || typeof existing !== 'object') return incoming
   const res = Array.isArray(incoming) ? [...incoming] : { ...incoming }
+  // Arrays of records (accounts / custom endpoints) are matched by `id`, never by index:
+  // index matching would hand account B the masked secret of account A after a reorder.
+  if (Array.isArray(incoming) && Array.isArray(existing)) {
+    const byId = new Map<string, any>()
+    for (const item of existing) {
+      if (item && typeof item === 'object' && typeof item.id === 'string') byId.set(item.id, item)
+    }
+    return incoming.map((item: any) => {
+      if (!item || typeof item !== 'object') return item
+      const prev = typeof item.id === 'string' ? byId.get(item.id) : undefined
+      return prev ? restoreMaskedSecrets(item, prev) : item
+    })
+  }
   for (const k of Object.keys(res)) {
     if (typeof res[k] === 'string' && (res[k] === '***' || res[k] === '••••••••' || res[k].includes('••••'))) {
       if (existing[k] !== undefined) {
@@ -340,6 +354,9 @@ export class QuotaManager {
   getSafeConfig(): QuotaConfig {
     const copy: any = JSON.parse(JSON.stringify(this.config || {}))
     const keyProps = ['apiKey', 'sessionToken', 'token']
+    if (typeof copy.httpProxy === 'string' && copy.httpProxy) {
+      copy.httpProxy = sanitizeProxyUrl(copy.httpProxy)
+    }
     for (const [k, v] of Object.entries(copy)) {
       if (v && typeof v === 'object' && !Array.isArray(v)) {
         for (const kp of keyProps) {
@@ -619,12 +636,10 @@ export class QuotaManager {
   }
 
   async testAllConnections(): Promise<Record<string, TestConnectionResult>> {
+    // Only instance tasks the user actually configured (provider enabled or account listed).
+    // Never append disabled providers here: probing them can read local IDE/CLI credentials
+    // the user explicitly switched off.
     const tasks = this.buildInstanceTasks()
-    for (const pName of this.providers.keys()) {
-      if (!tasks.some(t => t.id === pName || t.providerName === pName)) {
-        tasks.push({ id: pName, providerName: pName })
-      }
-    }
     const results: Record<string, TestConnectionResult> = {}
 
     await runWithConcurrency(tasks, async (t) => {

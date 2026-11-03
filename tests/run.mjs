@@ -406,6 +406,48 @@ try {
   const codexProv = new CodexProvider()
   assert.ok(codexProv, 'CodexProvider initialized')
   console.log('✓ CodexProvider dual window compatibility verified')
+
+  // 21. Masked DTO round-trip must follow account identity, not array position
+  const reorderMgr = new QuotaManager()
+  reorderMgr.saveConfig({
+    accounts: [
+      { id: 'acct-a', provider: 'deepseek', apiKey: 'sk-aaaa-secret-1111' },
+      { id: 'acct-b', provider: 'deepseek', apiKey: 'sk-bbbb-secret-2222' },
+    ],
+  })
+  const reorderSafe = reorderMgr.getSafeConfig()
+  reorderSafe.accounts.reverse()
+  reorderMgr.saveConfig(reorderSafe)
+  const after = reorderMgr.getConfig().accounts
+  const acctA = after.find(a => a.id === 'acct-a')
+  const acctB = after.find(a => a.id === 'acct-b')
+  assert.equal(acctA?.apiKey, 'sk-aaaa-secret-1111', 'account secret must survive a reorder by id')
+  assert.equal(acctB?.apiKey, 'sk-bbbb-secret-2222', 'account secret must not swap across accounts')
+  console.log('✓ masked config round-trip keeps per-account secrets identified by id')
+
+  // 22. Proxy credentials must never reach the browser DTO
+  const proxyMgr = new QuotaManager()
+  proxyMgr.saveConfig({ httpProxy: 'http://user:supersecret@127.0.0.1:7890' })
+  const proxySafe = proxyMgr.getSafeConfig()
+  assert.ok(!JSON.stringify(proxySafe).includes('supersecret'), 'safe config must not leak proxy password')
+  assert.ok(proxySafe.httpProxy.includes('***'), 'safe config must mask proxy credentials')
+  console.log('✓ proxy credentials masked in safe config DTO')
+
+  // 23. Bulk connectivity test only covers instances the user enabled
+  const scopeMgr = new QuotaManager()
+  scopeMgr.saveConfig({
+    deepseek: { enabled: false },
+    kimi: { enabled: false },
+    glm: { enabled: false },
+    enabledProviders: [],
+    accounts: [],
+    custom_compatible: [],
+  })
+  const tasks = scopeMgr.buildInstanceTasks()
+  const explicitlyDisabled = ['deepseek', 'kimi', 'glm']
+  const leaked = tasks.filter(t => explicitlyDisabled.includes(t.providerName))
+  assert.equal(leaked.length, 0, 'explicitly disabled providers must not enter the connectivity sweep')
+  console.log('✓ connectivity sweep excludes explicitly disabled providers')
 } finally {
   await new Promise((resolve) => testServer.close(resolve))
 }

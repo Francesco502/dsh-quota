@@ -7,16 +7,6 @@ interface HudPosition {
   y: number
 }
 
-function escapeHtml(str?: string): string {
-  if (!str) return ''
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
 const STORAGE_KEY = 'dsh_quota_hud_pos'
 
 function getSavedPosition(): HudPosition {
@@ -488,12 +478,12 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
     const popoverRows = metrics.map(m => {
       const color = getStatusColor(m.remainingPercent)
-      const safeName = escapeHtml(m.name)
-      const safeVal = escapeHtml(m.balanceText || `${m.remainingPercent}% 剩余`)
+      // Card/group/window text is escaped once at the controller boundary; escaping again here
+      // would render visible entities (`&amp;`).
       return `
         <div class="dsh-hud-popover-row">
-          <span class="dsh-hud-popover-name" title="${safeName}">${safeName}</span>
-          <span class="dsh-hud-popover-val" style="color: ${color};">${safeVal}</span>
+          <span class="dsh-hud-popover-name" title="${m.name}">${m.name}</span>
+          <span class="dsh-hud-popover-val" style="color: ${color};">${m.balanceText || `${m.remainingPercent}% 剩余`}</span>
         </div>
       `
     }).join('')

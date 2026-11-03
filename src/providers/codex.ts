@@ -300,7 +300,9 @@ export class CodexProvider implements IQuotaProvider {
       }
 
       const lowestRem = windows.length > 0 ? Math.min(...windows.map(w => w.remainingPercent)) : 100
-      const cardStatus = windows.length === 0 ? 'ok' : (lowestRem <= 0 ? 'error' : (lowestRem <= (config.alarmThresholdPercent ?? 15) ? 'warn' : 'ok'))
+      // Exhaustion is a warning, not a transport failure: `error` stays reserved for
+      // unreachable endpoints so alarms never read "额度耗尽" as "凭据失效".
+      const cardStatus = windows.length === 0 ? 'ok' : (lowestRem <= (config.alarmThresholdPercent ?? 15) ? 'warn' : 'ok')
 
       return {
         card: {

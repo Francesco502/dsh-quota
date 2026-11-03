@@ -477,12 +477,17 @@ export class AntigravityProvider implements IQuotaProvider {
         throw new Error(`无法获取额度明细 (${lastFetchErr})。若处于受限网络，请在设置中配置 HTTP 代理。`)
       }
 
-      // Check overall status: if any group has active windows vs exhausted
+      // Overall card status describes reachability and pressure, never "exhausted":
+      // `error` is reserved for failed collection so the alarm layer cannot report a
+      // quota-exhausted account as "connection failed / credential invalid".
       const allWindows = groups.flatMap(g => g.windows)
-      const hasAnyRemaining = allWindows.some(w => w.remainingPercent > 0)
       const isAnyLow = allWindows.some(w => w.remainingPercent > 0 && w.remainingPercent <= (config.alarmThresholdPercent ?? 15))
-      const cardStatus = allWindows.length === 0 ? 'ok' : (!hasAnyRemaining ? 'error' : (isAnyLow ? 'warn' : 'ok'))
+      const isAllExhausted = allWindows.length > 0 && allWindows.every(w => w.remainingPercent <= 0)
+      const cardStatus = allWindows.length === 0 ? 'ok' : (isAnyLow || isAllExhausted ? 'warn' : 'ok')
       const planName = summaryData?.plan || (hasArgonPool ? 'Antigravity Pro / Ultra' : 'Google Antigravity')
+      // Partial only when a degraded branch produced the numbers; a 2-group Ultra account
+      // is a complete answer, not a partial one.
+      const usedFallback = groups.length > 0 && !Array.isArray(summaryData?.groups)
 
       return {
         card: {
@@ -497,9 +502,9 @@ export class AntigravityProvider implements IQuotaProvider {
           lastUpdated: Date.now(),
           sourceProvenance: {
             endpoint: successfulEndpoint,
-            method: groups.length > 0 && summaryData?.groups ? 'official-summary' : 'model-fallback',
+            method: usedFallback ? 'model-fallback' : 'official-summary',
             timestamp: Date.now(),
-            partial: groups.length < 3,
+            partial: usedFallback,
             host: successfulEndpoint ? new URL(successfulEndpoint).hostname : undefined,
           },
         },
