@@ -1,13 +1,16 @@
 {
   "name": "@francescoli/dsh-quota",
-  "version": "0.4.0",
-  "description": "AI Quota and Token Usage Monitor for DeepSeek Harness (DeepSeek, SiliconFlow, OpenRouter, Cursor, Codex, Antigravity, Copilot, Kimi, GLM, Qwen, OpenCode)",
+  "version": "0.5.0-secure.1",
+  "engines": { "node": ">=24", "dsh": ">=0.2.2-alpha.2" },
+  "description": "Harness-native token usage by task, hour, day, model and provider, with credential-safe official account quotas and balances",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "publishConfig": {
     "access": "public",
@@ -18,8 +21,9 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "inject": [],
-      "platform": "web"
+      "inject": ["@deepseek-ai/dsh-client-ui-sidebar-right", "@deepseek-ai/dsh-client-locale"],
+      "platform": "web",
+      "immediately": true
     }
   },
   "repository": {
@@ -36,7 +40,7 @@
     "build:client": "node bundle-client.mjs",
     "build": "node bundle-host.mjs && node bundle-client.mjs",
     "prepack": "node bundle-host.mjs && node bundle-client.mjs",
-    "test": "node tests/run.mjs",
+    "test": "node bundle-host.mjs && node bundle-client.mjs && node --test tests/harness-*.test.mjs",
     "validate:release": "pwsh -File .github/scripts/validate-release.ps1"
   },
   "keywords": [
@@ -52,11 +56,13 @@
     "opencode-go"
   ],
   "files": [
-    "src",
     "lib",
+    "locale/*.json",
+    "icon.svg",
     "cordis.patch.yml",
     "package.json",
     "README.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "license": "Apache-2.0"

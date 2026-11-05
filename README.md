@@ -1,81 +1,88 @@
-# @francescoli/dsh-quota: DSH AI 额度与用量监控插件
+# dsh-quota — Harness-native usage and account quotas
 
-[![version](https://img.shields.io/badge/version-v0.4.0-blue.svg)](./package.json)
-[![npm](https://img.shields.io/badge/npm-@francescoli/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francescoli/dsh-quota)
-[![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
+**0.5.0 secure preview · Node.js 24+ · DSH 0.2.2-alpha.2 or newer**
 
-> 当前版本：**v0.4.0**
+A Sidebar tab showing two different things without confusing them:
 
-专门为 **DeepSeek Harness (DSH)** 打造的全功能 AI 服务额度、余额与用量监控插件。集中监控并展示 **DeepSeek 官方平台**、**Cursor**、**Codex (ChatGPT)**、**Google Antigravity**、**GitHub Copilot**、**OpenAI Platform**、**Anthropic Claude**、**Kimi**、**智谱 GLM**、**MiniMax**、**阿里通义千问**、**火山方舟**、**OpenCode-Go** 及 **OneAPI / NewAPI** 兼容中转的实时剩余额度、用量、充值余额、消耗速率及重置周期。
+1. **Actual Harness token usage** by task, model, provider, hour, day and request purpose.
+2. **Official account limits/balances** using accounts already authorized in Harness.
 
----
+中文：此版本重构了安全边界。通过 Harness Connection 验证所有 API，使用 Harness 凭据与网络策略；统计实际 token 用量，不再用 API 测活代替订阅额度，也不再提供任意地址、代理设置或本地凭据扫描。
 
-## ✨ 核心特性
+## What is measured
 
-1. **16+ 家服务全聚合**：
-   - **国内大模型**：DeepSeek（充值/赠金实时查询）、硅基流动 SiliconFlow（实时余额与充值金）、Kimi（代金券/余额）、智谱 GLM、MiniMax（海螺）、通义千问（百炼）、火山方舟（豆包）；
-   - **IDE 编程助手**：Cursor（免密读取 SQLite `state.vscdb`）、Google Antigravity（CloudCode 配额）、GitHub Copilot（本地凭据探测）；
-   - **海外官方与聚合**：OpenRouter（全局配额/用量）、Codex (ChatGPT Wham)、OpenAI Platform Billing、Anthropic Claude、OpenCode-Go、OneAPI / NewAPI 中转。
-2. **直观数据看板与 HUD 悬浮环**：
-   - **概览看板**：顶部 4 宫格总览、分类筛选 Tab、多模型分组折叠 (Accordion) 与宋代青绿雅致配色；
-   - **HUD 悬浮环**：支持鼠标悬停暂停轮播、数字平滑过渡、视口边界防溢出自动翻转、贴边微缩模式；
-   - **设置与测活**：为所有 Provider 提供一键「测试连接」与毫秒级延迟反馈。
-3. **时序统计与智能预警**：
-   - 本地 30 天时序历史采样记录；
-   - 自动计算近 24 小时平均消耗速率 (%/h) 与预估可用剩余时长；
-   - 多级阈值告警与侧边栏「额度监控」动态小红点 Badge 联动。
-4. **DSH Agent 深度协同**：
-   - 注册 `get_quota_status` Agent Tool，支持在对话中直接让 AI 查额度与获取模型可用状态。
-5. **安全与性能加固**：
-   - 独立 Provider TTL 缓存池，单服务网络超时不阻塞全局；
-   - 配置文件严格保存在本地 `~/.dsh/quota-config.json`（权限 `0600`）；
-   - 彻底支持跨平台路径解析与 Node.js SQLite 优雅降级。
+- Provider-reported `TokenUsage` from the native Harness session log: normal assistant requests, reported retry attempts and compaction.
+- Native `llm/stream` usage for auxiliary calls such as auto-review and session titles, from installation onward. Those numeric records persist in a Harness storage domain; requests are not redirected or reissued.
+- Fork-inherited events are excluded from the fork's spend. A task is a root Harness session including its subagent descendants. The current-session filter can include descendants or only that session.
+- Exact provider/model filters and explicit IANA time zones for hourly/daily buckets. The UI offers the last hour, today, 7 days and 30 days; the read API supports a range up to 366 days.
+- Separate uncached input, cache read, cache write, output and reasoning. Harness cache buckets are **disjoint** from uncached input; reasoning is an output subset and is not added twice.
 
----
+Unknown counts are not estimates or free calls. The response includes `unknownCalls`, indexing/coverage metadata and explicit limitations. `coverage.sessionsComplete` means all task logs are indexed; `coverage.complete` additionally requires no unknown receipts and complete auxiliary coverage since the persisted `trackingSince` watermark. Historical auxiliary calls without usage in the Harness log cannot be reconstructed. Auxiliary retention is 90 days/20,000 records; live/log reconciliation uses route/purpose/counts and a two-minute completion window because native requests carry no unique request id. Provider token totals are not subscription percentages or a monetary invoice.
 
-## 📦 安装方法
+## Account quota sources
 
-### 方式一：通过 DSH 插件市场 (dsh-market) 一键安装（推荐）
+| Source | What it shows | Credential source |
+| --- | --- | --- |
+| Codex / ChatGPT | Reported primary/secondary subscription windows and reset times | Harness `llm-pi-ai/openai-codex` OAuth grant |
+| Claude Code | Actual five-hour/seven-day subscription windows, including model-specific windows when reported | Harness `llm-pi-ai/anthropic` OAuth grant |
+| DeepSeek signed-in account | Recharge and bonus wallet balance by currency | Owning Harness `deepseekAccount` service |
+| DeepSeek API | API wallet balance | Exact Harness `DEEPSEEK_API_KEY` reference |
+| Other configured providers | Explicit quota API unsupported state | No extra credential access |
 
-1. 打开 DSH Web 界面 (`http://127.0.0.1:3080`)；
-2. 进入 **设置 (Settings)** → **插件市场 (Plugin Market)**；
-3. 搜索 `dsh-quota` 并点击 **安装 (Install)**；
-4. 刷新网页即可在侧边栏看到「额度监控」入口。
+A missing, expired or incompatible grant is reported as unavailable; sign in/renew through **Harness**, not this panel. No CLI auth files or browser databases are read. The plugin never refreshes or writes OAuth tokens independently. A missing quota field stays unknown, never fabricated as 100%.
 
-### 方式二：通过 DSH CLI (npm Scoped 模式) 安装
+Account reads share a 60-second cache and in-flight work, with at most two concurrent sources, a 15-second minimum forced-refresh interval, eight returned accounts, 8-second per-source deadlines and bounded response bodies. Quota endpoints are fixed HTTPS official origin/path pairs; redirects are forbidden. Calls use the native Host fetch and DSH-installed global proxy dispatcher, not a separate HTTP client or custom proxy fallback.
 
-```bash
-dsh plugin --profile web add @francescoli/dsh-quota
-```
+## UI
 
-### 方式三：通过 GitHub 源码链接安装
+Open the right Sidebar's page chooser and choose **Usage & quotas** / **Расход и квоты**. The tab stays inside the Harness layout and uses its theme and locale. Dynamic text is rendered by React, never interpolated into HTML. Usage polling pauses when the tab is hidden. Account tokens and editable endpoint/proxy fields do not exist in the browser.
 
-```bash
-dsh plugin --profile web add github:Francesco502/dsh-quota
-```
+## Install from this source
 
----
-
-## 🛠️ 构建与发布验证
-
-```bash
+```sh
 npm run build
 npm test
-pwsh -File .github/scripts/validate-release.ps1 -Tag v0.3.1
+dsh plugin --profile web add /absolute/path/to/dsh-quota
 ```
 
----
+When using the Harness agent's plugin tools, install this directory with `plugin_manager.install_bundle`; do not edit a profile composition by hand. Refresh the existing Harness page when updating a previously loaded client generation. No replacement web server is needed. This preview intentionally requires the current Connection, credential, session projection and storage-domain services rather than falling back to unsafe legacy behavior.
 
-## 📚 详细文档
+## Read API and future router integration
 
-- [系统架构与实现原理](./docs/ARCHITECTURE.md)
-- [新 Provider 扩展接入指南](./docs/PROVIDERS.md)
-- [常见问题与解答 (FAQ)](./docs/FAQ.md)
-- [版本管理与发布标准规范](./VERSIONING.md)
-- [版本更新日志](./CHANGELOG.md)
+All HTTP paths live under `/api/dsh-quota` and are registered through `ctx.connection.fetch`. Harness owner authentication and Host/Origin admission apply before dispatch:
 
----
+- `GET /usage` — local token accounting only.
+- `GET /accounts` — cached official account state.
+- `GET /snapshot` — `{schemaVersion, generatedAt, accountState, usage, routingEnabled:false}`.
+- `POST /refresh` — refresh official account state; `Content-Type: application/json`, body `{}` only.
 
-## 📄 开源协议
+Usage query keys: `from`, `to` (epoch milliseconds, inclusive/exclusive), `timeZone`, `sessionId`, `includeChildren`, `provider`, `model`. Unknown/duplicate parameters are rejected. There are **no** config, test-connection, login, proxy or custom-URL endpoints. Responses are JSON with `Cache-Control: no-store`.
+
+Host plugins may read `ctx.get('quotaMonitor')`:
+
+```js
+const monitor = ctx.get('quotaMonitor')
+const usage = await monitor.usage({ timeZone: 'Europe/Moscow' })
+const accounts = await monitor.accounts()
+const snapshot = await monitor.snapshot({ sessionId, includeChildren: true })
+```
+
+`version: 1` identifies the service contract. `usage` returns totals and `byProvider`, `byModel`, `byTask` (call purpose), `byHour`, `byDay`, `bySession`, `byRootSession`, `coverage`, `indexing` and `limitations`.
+
+The agent tool `get_quota_status` exposes the same read operations using `action: accounts | usage | snapshot`, plus usage-range filters. `groupBy` selects model/provider/task/session/rootSession/hour/day detail; `limit` bounds it to 1–100 rows (default 20), with explicit truncation metadata. `action: diagnostics` reads only plugin/client revision metadata, with no account access. It does not grant authority, modify credentials, choose models or change routing.
+
+A future router must distinguish stale account observations, unsupported quota APIs, unknown usage and pending historical indexing. This release only provides observations; **automatic model routing is deliberately off**.
+
+## Security and development
+
+Read [SECURITY.md](./SECURITY.md) for trust boundaries and deployment caveats. Legacy 0.4 source/docs remain in Git for review, but the build emits only the new Host module graph and safe React Client; old raw routes/providers are neither loaded nor included in the published runtime.
+
+```sh
+npm run build                 # dependency-free Node TypeScript stripping
+npm test                      # isolated fake-credential regressions, no real accounts
+npm pack --ignore-scripts     # inspect the already built distribution
+```
+
+No runtime dependencies, CDN assets or install-time scripts are introduced. Do not add telemetry, credential scans or an independently configured network stack to implement a quota source. Existing provider/model inference remains owned by Harness.
 
 [Apache-2.0](./LICENSE)
