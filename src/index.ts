@@ -20,7 +20,7 @@ export function createMonitorService(usage: any, quotas: any) {
     async snapshot(query: Record<string, unknown> = {}, options: { signal?: AbortSignal } = {}) {
       const valid = parseUsageQuery(query)
       const [accountState, usageState] = await Promise.all([this.accounts(options), usage.snapshot(valid)])
-      return { schemaVersion: 1, generatedAt: Date.now(), accountState, usage: usageState, routingEnabled: false }
+      return { schemaVersion: 1, generatedAt: Date.now(), accountState, usage: usageState }
     },
     async dispose() { closed.abort(); await Promise.allSettled([usage.dispose(), quotas.dispose()]) },
   }

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { createMonitorService, inject, VERSION } from '../src/index.ts'
 
 test('shared monitor service serves UI and agent data without enabling routing', async () => {
@@ -9,7 +10,7 @@ test('shared monitor service serves UI and agent data without enabling routing',
   const monitor = createMonitorService(usage, quotas)
   const result = await monitor.snapshot({ timeZone: 'Europe/Moscow', provider: 'fake-provider' })
   assert.equal(result.schemaVersion, 1)
-  assert.equal(result.routingEnabled, false)
+  assert.equal(Object.hasOwn(result, 'routingEnabled'), false)
   assert.equal(result.usage.totals.calls, 2)
   assert.equal(result.accountState.accounts[0].status, 'unsupported')
   assert.equal(reads[0].timeZone, 'Europe/Moscow')
@@ -29,6 +30,12 @@ test('request and plugin lifetimes cancel account reads; both backends dispose',
   await monitor.accounts(); await monitor.dispose()
   assert.equal(signals[1].aborted, true)
   assert.equal(disposed, 2)
+})
+test('published UI does not display or own the separate router state', () => {
+  const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.equal(client.includes('Monitoring only'), false)
+  assert.equal(client.includes('automatic routing is off'), false)
+  assert.equal(client.includes('noRouting'), false)
 })
 test('activation requires native accounting, credential, admission and durable storage services', () => {
   for (const key of ['connection', 'llm', 'credentials', 'sessionQuery', 'sessionProjections', 'storageDomain', 'tools']) assert.ok(inject.includes(key))

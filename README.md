@@ -53,7 +53,7 @@ All HTTP paths live under `/api/dsh-quota` and are registered through `ctx.conne
 
 - `GET /usage` — local token accounting only.
 - `GET /accounts` — cached official account state.
-- `GET /snapshot` — `{schemaVersion, generatedAt, accountState, usage, routingEnabled:false}`.
+- `GET /snapshot` — `{schemaVersion, generatedAt, accountState, usage}`.
 - `POST /refresh` — refresh official account state; `Content-Type: application/json`, body `{}` only.
 
 Usage query keys: `from`, `to` (epoch milliseconds, inclusive/exclusive), `timeZone`, `sessionId`, `includeChildren`, `provider`, `model`. Unknown/duplicate parameters are rejected. There are **no** config, test-connection, login, proxy or custom-URL endpoints. Responses are JSON with `Cache-Control: no-store`.
@@ -71,7 +71,7 @@ const snapshot = await monitor.snapshot({ sessionId, includeChildren: true })
 
 The agent tool `get_quota_status` exposes the same read operations using `action: accounts | usage | snapshot`, plus usage-range filters. `groupBy` selects model/provider/task/session/rootSession/hour/day detail; `limit` bounds it to 1–100 rows (default 20), with explicit truncation metadata. `action: diagnostics` reads only plugin/client revision metadata, with no account access. It does not grant authority, modify credentials, choose models or change routing.
 
-A future router must distinguish stale account observations, unsupported quota APIs, unknown usage and pending historical indexing. This release only provides observations; **automatic model routing is deliberately off**.
+A router belongs in a **separate plugin** with this package as a bundle dependency and `quotaMonitor` as its injected Host service. This monitor provides only observations and does not own or expose router state. Consumers must distinguish stale account observations, unsupported quota APIs, unknown usage and pending historical indexing.
 
 ## Security and development
 
