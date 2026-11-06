@@ -723,7 +723,7 @@ test('coverage.complete is false when any call lacks a usage receipt', async () 
   assert.equal(snap.coverage.historicalAuxComplete, true)
   assert.equal(snap.coverage.unknownUsageCalls, 1)
   assert.equal(snap.coverage.complete, false, 'unknown calls make the account total incomplete')
-  assert.ok(snap.limitations.some(line => line.includes('had no usage receipt')))
+  assert.ok(snap.limitations.some(line => line.includes('reported no usage')))
   await tracker.dispose()
 })
 
@@ -740,7 +740,7 @@ test('coverage.complete is false when the range starts before tracking began', a
   assert.equal(historical.coverage.sessionsComplete, true)
   assert.equal(historical.coverage.historicalAuxComplete, false)
   assert.equal(historical.coverage.complete, false)
-  assert.ok(historical.limitations.some(line => line.includes('began tracking')))
+  assert.ok(historical.limitations.some(line => line.includes('tracking began')))
 
   const tracked = await tracker.snapshot({ from: NOW, to: NOW + 60_000 })
   assert.equal(tracked.coverage.historicalAuxComplete, true)

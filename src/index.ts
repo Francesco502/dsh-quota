@@ -1,5 +1,6 @@
 /** Harness-native, credential-safe quota monitoring and usage accounting. */
 import { createUsageTracker } from './harness/usage.ts'
+import type { ExternalUsageOptions, ExternalUsageReceipt, ExternalUsageResult } from './harness/usage.ts'
 import { createQuotaMonitor } from './harness/quotas.ts'
 import { registerQuotaRoutes, parseUsageQuery, usageForTool } from './harness/api.ts'
 
@@ -8,7 +9,11 @@ export const VERSION = '0.5.0-secure.1'
 // falling back to unguarded routes or independent credential files.
 export const inject = ['connection', 'llm', 'credentials', 'sessionQuery', 'sessionProjections', 'storageDomain', 'tools']
 
-/** Shared read interface used by the UI/tool and future routing plugins. */
+/**
+ * Shared read interface used by the UI/tool and dependent routing plugins. The
+ * only write is idempotent receipt ingestion for calls the Harness did not
+ * observe; quotas and credentials stay read-only.
+ */
 export function createMonitorService(usage: any, quotas: any) {
   const closed = new AbortController()
   return {
@@ -16,6 +21,19 @@ export function createMonitorService(usage: any, quotas: any) {
     usage(query: Record<string, unknown> = {}) { return usage.snapshot(parseUsageQuery(query)) },
     accounts(options: { refresh?: boolean; signal?: AbortSignal } = {}) {
       return quotas.snapshot({ ...options, signal: options.signal ? AbortSignal.any([options.signal, closed.signal]) : closed.signal })
+    },
+    /**
+     * Record one direct model call that bypassed `ctx.llm` (Jev, Groq, GLM).
+     * A duplicate id waits for the accepted commit and reports its durability,
+     * so a caller can treat `persisted: true` as the acknowledgement.
+     * @param receipt - caller-stable id, route, task, time, and optional counts.
+     * @param options - caller cancellation; disposal also aborts pending ingestion.
+     * @returns the ingestion outcome.
+     */
+    recordExternalUsage(receipt: ExternalUsageReceipt, options: ExternalUsageOptions = {}): Promise<ExternalUsageResult> {
+      return usage.recordExternalUsage(receipt, {
+        signal: options.signal ? AbortSignal.any([options.signal, closed.signal]) : closed.signal,
+      })
     },
     async snapshot(query: Record<string, unknown> = {}, options: { signal?: AbortSignal } = {}) {
       const valid = parseUsageQuery(query)

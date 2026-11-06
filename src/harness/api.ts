@@ -79,7 +79,19 @@ function guard(operation: (request: Request) => Promise<unknown>) {
   }
 }
 export function registerQuotaRoutes(ctx: any, monitor: any) {
+  // Optional neighbour: the coordinator reports its own Jev calls, which never
+  // pass through the Harness LLM seam and so never reach this plugin's meter.
+  const jevSource = () => {
+    try { return ctx.get?.('coordinatorJev') } catch { return undefined }
+  }
   const routes = [
+    { path: `${API_ROOT}/jev`, methods: ['GET'], requestBody: 'buffered', fetch: guard(() => {
+      const service = jevSource()
+      if (service === undefined || typeof service.usage !== 'function') {
+        return { available: false, reason: 'coordinator service not found' }
+      }
+      return { available: true, ...service.usage() }
+    }) },
     { path: `${API_ROOT}/usage`, methods: ['GET'], requestBody: 'buffered', fetch: guard(request => monitor.usage(queryOf(request))) },
     { path: `${API_ROOT}/snapshot`, methods: ['GET'], requestBody: 'buffered', fetch: guard(request => monitor.snapshot(queryOf(request), { signal: request.signal })) },
     { path: `${API_ROOT}/accounts`, methods: ['GET'], requestBody: 'buffered', fetch: guard(request => {

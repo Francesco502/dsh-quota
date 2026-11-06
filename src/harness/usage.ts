@@ -53,6 +53,17 @@ const LIVE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
 const MAX_LIVE_RECORDS = 20_000
 /** Session listing is cached briefly so a refresh is not a persistence listing. */
 const LISTING_TTL_MS = 2_000
+/**
+ * Stable persisted-id namespace for ingested receipts. Native live ids are
+ * `time-counter-random`, so this prefix cannot collide with one.
+ */
+const EXTERNAL_ID_PREFIX = 'external:'
+/** Bound on a caller-supplied idempotency key. */
+const MAX_RECEIPT_ID_LENGTH = 200
+/** Bound on a caller-supplied route/task/session label. */
+const MAX_RECEIPT_FIELD_LENGTH = 256
+/** Default purpose label for a receipt that names no task. */
+const EXTERNAL_DEFAULT_TASK = 'external'
 
 const UNKNOWN = 'unknown'
 const UNATTRIBUTED = '(unattributed)'
@@ -193,6 +204,58 @@ export interface UsageTrackerOptions {
   maxCachedSessions?: number
 }
 
+/** Provider-reported counts for one call that bypassed the Harness `llm` service. */
+export interface ExternalUsageCounts {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  reasoningTokens?: number
+  /** Provider total; the module derives a disjoint total when cache buckets are present. */
+  totalTokens?: number
+}
+
+/**
+ * One direct model call that never entered the Harness `llm` service, so the
+ * native Session log and `llm/stream` observer cannot see it. Use it for
+ * side-channel calls (Jev, Groq, GLM); a call made through `ctx.llm` is already
+ * observed and must not be reported here.
+ */
+export interface ExternalUsageReceipt {
+  /** Caller-owned idempotency key: replaying the same id is a no-op, including across restarts. */
+  callId: string
+  /** Harness Session the call belongs to, when known; improves native-call deduplication. */
+  sessionId?: string
+  /** Provider route or external service name, for example `groq`. */
+  provider: string
+  /** Model id sent on the wire. */
+  model: string
+  /** Purpose/task label; defaults to `external`. Never prompt or message content. */
+  task?: string
+  /** Completion epoch milliseconds; defaults to the tracker clock. */
+  time?: number
+  /** Provider counts; absent or `null` keeps the call explicitly unknown, never free. */
+  usage?: ExternalUsageCounts | null
+}
+
+/** Outcome of one {@link UsageTracker.recordExternalUsage} call. */
+export interface ExternalUsageResult {
+  /** `stored` accepted a new receipt; `duplicate` already held this `callId` and reused its commit. */
+  status: 'stored' | 'duplicate'
+  /**
+   * True only after the record is durably in the live domain. A `stored` or
+   * `duplicate` receipt with `false` is counted in this process but was not
+   * committed, so replaying the same id retries the write.
+   */
+  persisted: boolean
+}
+
+/** Options shared by receipt ingestion. */
+export interface ExternalUsageOptions {
+  /** Rejects the receipt with its reason when aborted before the write. */
+  signal?: AbortSignal
+}
+
 /** Public tracker returned by {@link createUsageTracker}. */
 export interface UsageTracker {
   /**
@@ -203,6 +266,16 @@ export interface UsageTracker {
   start(): Promise<() => void>
   /** Read a filtered, time-zone-aware snapshot from the in-process index. */
   snapshot(query?: UsageQuery): Promise<UsageSnapshot>
+  /**
+   * Ingest one receipt for a model call the Harness did not observe. The id is
+   * idempotent; a duplicate waits for the accepted commit instead of
+   * acknowledging an unfinished or failed write, and replaying a failed id
+   * retries persistence. Writes are drained by {@link UsageTracker.dispose}.
+   * @param receipt - validated route, task, time, and optional provider counts.
+   * @param options - caller cancellation.
+   * @returns the ingestion outcome with its durability.
+   */
+  recordExternalUsage(receipt: ExternalUsageReceipt, options?: ExternalUsageOptions): Promise<ExternalUsageResult>
   /** Idempotent teardown. */
   dispose(): Promise<void>
 }
@@ -691,6 +764,12 @@ class UsageTrackerImpl implements UsageTracker {
 
   private readonly live = new Map<string, LiveUsageRecord>()
   private readonly cachedSessions = new Map<string, CachedSession>()
+  /** Domain writes in flight; disposal awaits these before closing storage. */
+  private readonly pendingWrites = new Set<Promise<unknown>>()
+  /** Accepted receipt writes by live id, so a duplicate observes the same commit. */
+  private readonly externalWrites = new Map<string, Promise<boolean>>()
+  /** Receipt ids already in the live domain; memory holds every accepted record. */
+  private readonly persistedExternal = new Set<string>()
   private cachedCallCount = 0
   private listing: { at: number; records: SessionMeta[] } | undefined
   private prewarmRunning = false
@@ -784,6 +863,8 @@ class UsageTrackerImpl implements UsageTracker {
       }
       this.handle = undefined
     }
+    // A receipt write accepted before disposal must reach the domain before it closes.
+    await this.drainWrites()
     if (this.domain !== undefined) {
       try {
         await this.domain.close()
@@ -803,6 +884,8 @@ class UsageTrackerImpl implements UsageTracker {
       this.metaTable = undefined
     }
     this.live.clear()
+    this.externalWrites.clear()
+    this.persistedExternal.clear()
     this.cachedSessions.clear()
     this.cachedCallCount = 0
     this.listing = undefined
@@ -940,7 +1023,10 @@ class UsageTrackerImpl implements UsageTracker {
         // The committed log is authoritative; drop the leftover live copy so
         // later snapshots and restarts do not reconsider it.
         this.live.delete(record.id)
-        if (this.liveTable !== undefined) void this.liveTable.delete(record.id).catch(() => {})
+        this.persistedExternal.delete(record.id)
+        if (this.liveTable !== undefined) {
+          void this.trackWrite(this.liveTable.delete(record.id)).catch(() => {})
+        }
         continue
       }
       if (record.sessionId === undefined) {
@@ -986,23 +1072,23 @@ class UsageTrackerImpl implements UsageTracker {
     const complete = sessionsComplete && historicalAuxComplete && totals.unknownCalls === 0
 
     const limitations = [...this.notes]
-    limitations.push('Historical auto-review and session-title usage never enters the Session log; only calls observed live (and the persisted live table) contribute those task rows.')
+    limitations.push('Auto-review and session-title calls stay out of the Session log; only calls observed live are counted.')
     if (!this.liveObservationAvailable) {
       limitations.push('llm/stream observation is unavailable in this composition; auxiliary call usage is absent from this snapshot.')
     } else if (this.trackingSince === 0) {
       limitations.push('Tracking start is unknown; historical auxiliary coverage cannot be proven.')
     } else if (from < this.trackingSince) {
-      limitations.push(`Query starts before this installation began tracking at ${isoTime(this.trackingSince)}; historical auxiliary usage in that prefix may be missing.`)
+      limitations.push(`Query starts before tracking began at ${isoTime(this.trackingSince)}; earlier auxiliary usage may be missing.`)
     } else if (!this.liveStorageAvailable && from < this.startedAt) {
-      limitations.push('Live auxiliary storage is unavailable; only calls observed since this process started contribute.')
+      limitations.push('Live auxiliary storage is unavailable; only calls observed since this process started count.')
     } else if (from < retentionFloor) {
-      limitations.push('Query starts before the 90-day live auxiliary retention horizon; older auxiliary calls may be missing.')
+      limitations.push('Query starts before the 90-day auxiliary retention horizon; older auxiliary calls may be missing.')
     }
-    limitations.push('The live-only auxiliary table keeps the most recent 90 days, up to 20,000 records; older auxiliary calls are pruned.')
+    limitations.push('Live auxiliary records are kept for 90 days, up to 20,000.')
     if (this.liveCapacityPruned) {
       limitations.push('The live auxiliary capacity was exceeded; older auxiliary calls may be missing from this snapshot.')
     }
-    limitations.push('Monetary cost is not estimated: only provider-reported token counts are aggregated.')
+    limitations.push('Token counts only; no money estimate.')
     if (unavailableSessions > 0) {
       limitations.push(`${unavailableSessions} Session(s) could not be read; their usage is absent from this snapshot.`)
     }
@@ -1010,11 +1096,10 @@ class UsageTrackerImpl implements UsageTracker {
       limitations.push(`${pendingSessions} Session(s) are still being indexed; refresh after background backfill settles.`)
     }
     if (totals.unknownCalls > 0) {
-      limitations.push(`${totals.unknownCalls} settled call(s) had no usage receipt; totals are incomplete and coverage.complete is false.`)
+      limitations.push(`${totals.unknownCalls} call(s) reported no usage; totals exclude them and that is not proof they were free.`)
     }
-    limitations.push('A settled attempt with no usage receipt is counted in calls and unknownCalls: absence of a receipt does not prove the request was free.')
-    limitations.push('Reported loop/compaction usage becomes durable with its Session event; a crash before that commit leaves only the live copy, which is not persisted.')
-    limitations.push('Live/log reconciliation uses session, route, task, exact counts, and a 2-minute window; identical calls inside that window cannot be distinguished without a provider request id.')
+    limitations.push('Loop and compaction usage is durable once its Session event is committed.')
+    limitations.push('Live and logged calls are matched within 2 minutes; identical calls can be confused without a provider request id.')
 
     return {
       generatedAt,
@@ -1148,24 +1233,148 @@ class UsageTrackerImpl implements UsageTracker {
     return `${time.toString(36)}-${this.liveCounter.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   }
 
+  // -- external receipts -----------------------------------------------------
+
+  async recordExternalUsage(receipt: ExternalUsageReceipt, options: ExternalUsageOptions = {}): Promise<ExternalUsageResult> {
+    if (this.disposed) throw new Error('quota external usage: the usage tracker is disposed')
+    options.signal?.throwIfAborted()
+    if (this.startPromise !== undefined) await this.startPromise
+    else if (!this.started) await this.start()
+    options.signal?.throwIfAborted()
+    // Validation runs at this JSON boundary: a malformed receipt must name its
+    // field instead of silently becoming an unknown or zero-token call.
+    const normalized = normalizeExternalReceipt(receipt, this.now())
+    const id = `${EXTERNAL_ID_PREFIX}${normalized.callId}`
+    // An accepted write is the id's commit: a duplicate must observe it, not
+    // acknowledge it before the record is durable.
+    const inFlight = this.externalWrites.get(id)
+    if (inFlight !== undefined) return { status: 'duplicate', persisted: await inFlight }
+    if (this.live.has(id)) {
+      // The record may be memory-only because its first write failed; replay
+      // retries persistence instead of reporting a durable duplicate.
+      return { status: 'duplicate', persisted: await this.retryExternal(id) }
+    }
+    const record: LiveUsageRecord = {
+      id,
+      ...normalized.sessionId === undefined ? {} : { sessionId: normalized.sessionId },
+      time: normalized.time,
+      provider: normalized.provider,
+      model: normalized.model,
+      task: normalized.task,
+      inputTokens: normalized.usage.inputTokens,
+      outputTokens: normalized.usage.outputTokens,
+      ...normalized.usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: normalized.usage.cacheReadTokens },
+      ...normalized.usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: normalized.usage.cacheWriteTokens },
+      ...normalized.usage.reasoningTokens === undefined ? {} : { reasoningTokens: normalized.usage.reasoningTokens },
+      totalTokens: normalized.usage.totalTokens,
+      reported: normalized.usage.reported,
+      source: 'live',
+    }
+    return { status: 'stored', persisted: await this.writeExternal(id, record) }
+  }
+
+  /**
+   * Retry persistence for a receipt this process already holds.
+   * @param id - live id of the accepted receipt.
+   * @returns whether the record is durable after this attempt.
+   */
+  private retryExternal(id: string): Promise<boolean> {
+    if (this.persistedExternal.has(id)) return Promise.resolve(true)
+    const inFlight = this.externalWrites.get(id)
+    if (inFlight !== undefined) return inFlight
+    const existing = this.live.get(id)
+    if (existing === undefined) return Promise.resolve(false)
+    return this.writeExternal(id, existing)
+  }
+
+  /**
+   * Start the one commit for an id and expose it to duplicates.
+   * @param id - live id of the accepted receipt.
+   * @param record - accepted record, unchanged on replay.
+   * @returns whether the write reached the live domain.
+   */
+  private writeExternal(id: string, record: LiveUsageRecord): Promise<boolean> {
+    const write = this.persistExternal(id, record)
+    this.externalWrites.set(id, write)
+    void write.finally(() => {
+      // A failed write leaves no entry so a replay can try again.
+      if (this.externalWrites.get(id) === write) this.externalWrites.delete(id)
+    })
+    return write
+  }
+
+  /**
+   * Commit one receipt to the live domain, keeping it in memory regardless.
+   * @param id - live id of the accepted receipt.
+   * @param record - accepted record.
+   * @returns whether the domain accepted the record.
+   */
+  private async persistExternal(id: string, record: LiveUsageRecord): Promise<boolean> {
+    this.live.set(id, record)
+    this.pruneLive(id)
+    const table = this.liveTable
+    if (table === undefined) return false
+    try {
+      await this.trackWrite(table.put(id, record))
+    } catch {
+      // Fail-soft: this process still counts the record, and the caller sees
+      // `persisted: false` so it can replay instead of assuming durability.
+      return false
+    }
+    this.persistedExternal.add(id)
+    return true
+  }
+
+  /**
+   * Store one live record in memory and, unless the call already has a durable
+   * Session-log home, in the live domain.
+   * @param record - the record to store.
+   */
   private addLive(record: LiveUsageRecord): void {
     this.live.set(record.id, record)
     // Reported loop calls already have an authoritative durable home in the
     // Session log; unknown calls and auxiliary purposes are persisted so a
     // restart can still count them (and dedupe them against a late log event).
-    if (record.reported && (record.task === 'assistant' || record.task === 'compaction')) return
+    const persist = !(record.reported && (record.task === 'assistant' || record.task === 'compaction'))
     const table = this.liveTable
-    if (table !== undefined) {
-      void table.put(record.id, record).catch(() => {
+    if (persist && table !== undefined) {
+      void this.trackWrite(table.put(record.id, record)).catch(() => {
         // Fail-soft: live-only history is best effort, like the projection cache.
       })
     }
+    this.pruneLive(record.id)
+  }
+
+  /**
+   * Keep the live map within its record bound, deleting the oldest rows.
+   * @param keepId - the just-accepted record, never pruned by its own insert.
+   */
+  private pruneLive(keepId: string): void {
     while (this.live.size > MAX_LIVE_RECORDS) {
       const oldest = this.live.keys().next()
-      if (oldest.done === true || oldest.value === record.id) break
+      if (oldest.done === true || oldest.value === keepId) break
       this.live.delete(oldest.value)
+      this.persistedExternal.delete(oldest.value)
       this.liveCapacityPruned = true
-      if (this.liveTable !== undefined) void this.liveTable.delete(oldest.value).catch(() => {})
+      if (this.liveTable !== undefined) {
+        void this.trackWrite(this.liveTable.delete(oldest.value)).catch(() => {})
+      }
+    }
+  }
+
+  /** Keep one domain write visible to disposal until it settles. */
+  private trackWrite<T>(write: Promise<T>): Promise<T> {
+    const tracked: Promise<T> = write.finally(() => {
+      this.pendingWrites.delete(tracked)
+    })
+    this.pendingWrites.add(tracked)
+    return tracked
+  }
+
+  /** Wait for every accepted domain write, including failures. */
+  private async drainWrites(): Promise<void> {
+    while (this.pendingWrites.size > 0) {
+      await Promise.allSettled([...this.pendingWrites])
     }
   }
 
@@ -1432,10 +1641,12 @@ class UsageTrackerImpl implements UsageTracker {
           const parsed = liveRecordSchema.parse(raw)
           if (parsed.time < cutoff || this.live.size >= MAX_LIVE_RECORDS) {
             if (this.live.size >= MAX_LIVE_RECORDS) this.liveCapacityPruned = true
-            void table.delete(id).catch(() => {})
+            void this.trackWrite(table.delete(id)).catch(() => {})
             continue
           }
           this.live.set(id, parsed)
+          // The record came from the domain, so its id is already durable.
+          if (id.startsWith(EXTERNAL_ID_PREFIX)) this.persistedExternal.add(id)
         } catch {
           // The domain already skips invalid records when the backend supports
           // backup-and-skip; ignore anything else defensively.
@@ -1826,6 +2037,86 @@ function filterString(value: unknown, name: string, maxLength: number): string |
 
 function numberOr(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+// ---------------------------------------------------------------------------
+// External receipt validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Read one caller-supplied label from a receipt.
+ * @param value - raw field value.
+ * @param field - field name reported on rejection.
+ * @param maxLength - upper bound in characters.
+ * @returns the validated string.
+ */
+function receiptString(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
+    throw new Error(`quota external usage: ${field} must be a non-empty string of at most ${maxLength} characters`)
+  }
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`quota external usage: ${field} must not contain control characters`)
+  }
+  return value
+}
+
+/**
+ * Validate one receipt and normalize its counts.
+ * @param receipt - raw JSON-shaped receipt from a caller.
+ * @param now - completion time used when the receipt omits one.
+ * @returns the validated fields with normalized usage.
+ */
+function normalizeExternalReceipt(receipt: unknown, now: number): {
+  callId: string
+  sessionId?: string
+  provider: string
+  model: string
+  task: string
+  time: number
+  usage: NormalizedUsage
+} {
+  if (!isRecord(receipt)) throw new Error('quota external usage: receipt must be an object')
+  const callId = receiptString(receipt.callId, 'callId', MAX_RECEIPT_ID_LENGTH)
+  const provider = receiptString(receipt.provider, 'provider', MAX_RECEIPT_FIELD_LENGTH)
+  const model = receiptString(receipt.model, 'model', MAX_RECEIPT_FIELD_LENGTH)
+  const task = receipt.task === undefined
+    ? EXTERNAL_DEFAULT_TASK
+    : receiptString(receipt.task, 'task', MAX_RECEIPT_FIELD_LENGTH)
+  const sessionId = receipt.sessionId === undefined || receipt.sessionId === null
+    ? undefined
+    : receiptString(receipt.sessionId, 'sessionId', MAX_RECEIPT_FIELD_LENGTH)
+  const time = receipt.time === undefined ? now : receipt.time
+  if (!isCount(time)) throw new Error('quota external usage: time must be a non-negative safe integer in epoch milliseconds')
+  return {
+    callId,
+    ...sessionId === undefined ? {} : { sessionId },
+    provider,
+    model,
+    task,
+    time,
+    usage: normalizeExternalUsage(receipt.usage),
+  }
+}
+
+/**
+ * Validate provider counts; an absent record stays explicitly unknown.
+ * @param raw - raw `usage` value from a receipt.
+ * @returns normalized counts with `reported` false when the caller supplied none.
+ */
+function normalizeExternalUsage(raw: unknown): NormalizedUsage {
+  if (raw === undefined || raw === null) return { ...zeroCounts(), totalTokens: 0, reported: false }
+  if (!isRecord(raw)) throw new Error('quota external usage: usage must be an object or null')
+  for (const key of ['inputTokens', 'outputTokens'] as const) {
+    if (!isCount(raw[key])) {
+      throw new Error(`quota external usage: usage.${key} must be a non-negative safe integer`)
+    }
+  }
+  for (const key of ['cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'totalTokens'] as const) {
+    if (raw[key] !== undefined && !isCount(raw[key])) {
+      throw new Error(`quota external usage: usage.${key} must be a non-negative safe integer when present`)
+    }
+  }
+  return normalizeUsage(raw)
 }
 
 function numberOf(value: unknown, fallback: number): number {

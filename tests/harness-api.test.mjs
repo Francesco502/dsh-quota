@@ -24,7 +24,7 @@ function fixture() {
 }
 test('registers only Connection routes; no mutable config, login, arbitrary endpoint or proxy route', async () => {
   const f = fixture()
-  assert.equal(f.routes.size, 4)
+  assert.equal(f.routes.size, 5)
   for (const path of ['/config', '/test-connection', '/test-all', '/auth/codex/start', '/auth/cursor/connect']) {
     assert.equal((await f.invoke('/api/dsh-quota' + path)).status, 404)
   }
