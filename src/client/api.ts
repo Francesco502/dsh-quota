@@ -1,3 +1,9 @@
+import { windowQuotaKind, isQuantified } from '../core/types.ts'
+import type { QuotaKind } from '../core/types.ts'
+
+export { windowQuotaKind, isQuantified }
+export type { QuotaKind }
+
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
 export type ProxyMode = 'direct' | 'proxy-required' | 'proxy-preferred'
 
@@ -5,8 +11,12 @@ export interface MetricWindow {
   id: string
   label: string
   subtitle?: string
-  usedPercent: number
-  remainingPercent: number
+  /** Absent unless the upstream reports a real quota ratio — never synthesize 0/100. */
+  usedPercent?: number
+  /** Absent under the same rule as `usedPercent`. */
+  remainingPercent?: number
+  /** What this window measures; resolve legacy windows with `windowQuotaKind()`. */
+  quotaKind?: QuotaKind
   resetAt?: string
   barType?: 'circle' | 'line' | 'balance'
   status?: 'active' | 'disabled' | 'unknown' | 'exhausted'
@@ -171,6 +181,52 @@ export function getRefreshIntervalSeconds(config?: QuotaConfig): number {
   return 60
 }
 
+/** Header the host requires on every `/api/dsh-quota/*` request. */
+export const QUOTA_REQUEST_HEADER = 'X-DSH-Quota'
+/** Hard timeout for every client request so a half-open connection cannot hang the UI. */
+export const REQUEST_TIMEOUT_MS = 8000
+
+export interface ResolveApiBaseInput {
+  /** Injectable global for DOM-free tests. Defaults to `globalThis`. */
+  global?: { __DSH_TRANSPORT__?: { streamBaseUrl?: unknown } } | undefined
+  /** Injectable document base URI for DOM-free tests. Defaults to `document.baseURI`. */
+  baseURI?: string | undefined
+}
+
+/**
+ * Resolve the base all quota requests are relative to.
+ *
+ * Desktop injects `globalThis.__DSH_TRANSPORT__.streamBaseUrl`; the web shell
+ * serves the plugin from the document origin. Keeping this single sourced keeps
+ * absolute `/api/dsh-quota/*` paths from 404-ing when the two differ.
+ */
+export function resolveApiBase(input: ResolveApiBaseInput = {}): string {
+  const hasOwn = (key: string): boolean => Object.prototype.hasOwnProperty.call(input, key)
+  const g = hasOwn('global')
+    ? input.global
+    : (typeof globalThis === 'undefined' ? undefined : (globalThis as any))
+  const transportBase = g?.__DSH_TRANSPORT__?.streamBaseUrl
+  if (typeof transportBase === 'string' && transportBase.trim() !== '') return transportBase.trim()
+
+  const baseURI = hasOwn('baseURI')
+    ? input.baseURI
+    : (typeof document === 'undefined' ? undefined : document.baseURI)
+  if (typeof baseURI === 'string' && baseURI.trim() !== '') return baseURI.trim()
+  return '/'
+}
+
+/** Resolve a relative quota path (e.g. `api/dsh-quota/status`) against the base. */
+export function resolveApiUrl(path: string, input: ResolveApiBaseInput = {}): string {
+  const relative = path.replace(/^\/+/, '')
+  const base = resolveApiBase(input)
+  try {
+    const normalized = base.endsWith('/') ? base : `${base}/`
+    return new URL(relative, normalized).href
+  } catch {
+    return `/${relative}`
+  }
+}
+
 /** Encode text for safe interpolation into view markup. */
 export function escapeHtmlText(value: unknown): string {
   if (value === undefined || value === null) return ''
@@ -203,8 +259,36 @@ export function escapeCardText(card: AuthCardItem): AuthCardItem {
         ...win,
         label: escapeHtmlText(win.label),
         subtitle: win.subtitle === undefined ? undefined : escapeHtmlText(win.subtitle),
+        amountText: win.amountText === undefined ? undefined : escapeHtmlText(win.amountText),
       })),
     })),
+  }
+}
+
+/**
+ * Single request entry point: transport base, no-store, hard timeout and the
+ * host's CSRF header applied exactly once for every client call.
+ */
+async function quotaFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers)
+  headers.set(QUOTA_REQUEST_HEADER, '1')
+  const requestInit: RequestInit = {
+    ...init,
+    headers,
+    cache: 'no-store',
+  }
+  if (init.signal === undefined) {
+    requestInit.signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  } else {
+    requestInit.signal = init.signal
+  }
+  try {
+    return await fetch(resolveApiUrl(path), requestInit)
+  } catch (err: any) {
+    if (init.signal === undefined && (err?.name === 'TimeoutError' || err?.name === 'AbortError')) {
+      throw new Error(`额度接口请求超时（${Math.round(REQUEST_TIMEOUT_MS / 1000)} 秒未响应）`)
+    }
+    throw new Error(`无法连接额度接口：${err?.message || String(err)}`)
   }
 }
 
@@ -215,25 +299,27 @@ export class QuotaClientApi {
     alarms?: QuotaAlarm[]
     lastUpdated: number
   }> {
-    const res = await fetch(`/api/dsh-quota/status?force=${force}`)
+    const res = await quotaFetch(`api/dsh-quota/status?force=${force}`)
     if (!res.ok) throw new Error(`获取额度失败 (${res.status})`)
     return res.json()
   }
 
   async refreshSingle(providerOrId: string): Promise<AuthCardItem> {
-    const res = await fetch(`/api/dsh-quota/status?provider=${encodeURIComponent(providerOrId)}&force=true`)
+    const res = await quotaFetch(`api/dsh-quota/status?provider=${encodeURIComponent(providerOrId)}&force=true`)
     if (!res.ok) throw new Error(`刷新服务失败 (${res.status})`)
     const data = await res.json()
-    if (data.card) return data.card
-    if (data.cards && Array.isArray(data.cards)) {
+    if (data && data.card) return data.card
+    if (data && Array.isArray(data.cards)) {
       const found = data.cards.find((c: any) => c.id === providerOrId || c.provider === providerOrId)
       if (found) return found
     }
-    return data
+    // A missing card is an error, never a fallback value: writing `{ok:true}` into
+    // the card list used to break the next render tick.
+    throw new Error(`未找到服务「${providerOrId}」的额度数据，可能已被删除、改名或禁用`)
   }
 
   async testConnection(provider: string, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
-    const res = await fetch('/api/dsh-quota/test-connection', {
+    const res = await quotaFetch('api/dsh-quota/test-connection', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider, accountConfig }),
@@ -243,7 +329,7 @@ export class QuotaClientApi {
   }
 
   async testAllConnections(): Promise<Record<string, TestConnectionResult>> {
-    const res = await fetch('/api/dsh-quota/test-all', {
+    const res = await quotaFetch('api/dsh-quota/test-all', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
@@ -253,20 +339,20 @@ export class QuotaClientApi {
   }
 
   async getHistory(instanceId: string, days = 7): Promise<QuotaHistoryPoint[]> {
-    const res = await fetch(`/api/dsh-quota/history?instanceId=${encodeURIComponent(instanceId)}&days=${days}`)
+    const res = await quotaFetch(`api/dsh-quota/history?instanceId=${encodeURIComponent(instanceId)}&days=${days}`)
     if (!res.ok) return []
     const data = await res.json()
     return data.points || []
   }
 
   async getConfig(): Promise<QuotaConfig> {
-    const res = await fetch('/api/dsh-quota/config')
+    const res = await quotaFetch('api/dsh-quota/config')
     if (!res.ok) throw new Error(`获取配置失败 (${res.status})`)
     return res.json()
   }
 
   async saveConfig(cfg: QuotaConfig): Promise<void> {
-    const res = await fetch('/api/dsh-quota/config', {
+    const res = await quotaFetch('api/dsh-quota/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cfg),
@@ -275,21 +361,25 @@ export class QuotaClientApi {
   }
 
   async startCodexLogin(): Promise<string> {
-    const res = await fetch('/api/dsh-quota/auth/codex/start')
+    const res = await quotaFetch('api/dsh-quota/auth/codex/start')
     if (!res.ok) throw new Error(`启动 Codex 登录失败 (${res.status})`)
     const data = await res.json()
     return data.authUrl
   }
 
   async startAntigravityLogin(): Promise<string> {
-    const res = await fetch('/api/dsh-quota/auth/antigravity/start')
+    const res = await quotaFetch('api/dsh-quota/auth/antigravity/start')
     if (!res.ok) throw new Error(`启动 Antigravity 登录失败 (${res.status})`)
     const data = await res.json()
     return data.authUrl
   }
 
   async connectCursor(): Promise<AuthCardItem | undefined> {
-    const res = await fetch('/api/dsh-quota/auth/cursor/connect', { method: 'POST' })
+    // POST routes require an application/json content type (anti-CSRF preflight).
+    const res = await quotaFetch('api/dsh-quota/auth/cursor/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
     if (!res.ok) throw new Error(`连接 Cursor 失败 (${res.status})`)
     const data = await res.json()
     return data.card

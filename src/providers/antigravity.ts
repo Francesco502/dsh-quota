@@ -1,5 +1,5 @@
 import type { IQuotaProvider, QuotaConfig, ProviderResult, MetricGroup, MetricWindow, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
-import { formatQuotaResetText } from '../core/types.ts'
+import { formatQuotaResetText, isQuantified } from '../core/types.ts'
 import { getAppStoragePaths } from '../core/paths.ts'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -11,6 +11,44 @@ interface OAuthTokenInfo {
   expiry?: number
   email?: string
   name?: string
+}
+
+interface TokenRefreshInfo {
+  accessToken: string
+  refreshToken?: string
+  expiresAt?: number
+}
+
+/** Parse an upstream numeric field without ever turning null/undefined into 0. */
+function parseFinite(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+/** Normalize a reset timestamp: ISO string, epoch seconds or epoch milliseconds. */
+function normalizeResetAt(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value <= 0) return undefined
+    const ms = value < 1e11 ? value * 1000 : value
+    const date = new Date(ms)
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+  }
+  if (typeof value === 'string') {
+    const parsed = parseFinite(value)
+    if (parsed !== undefined) return normalizeResetAt(parsed)
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+  }
+  return undefined
 }
 
 function getPlatformTag(): string {
@@ -102,6 +140,12 @@ export class AntigravityProvider implements IQuotaProvider {
   name = 'antigravity'
   category = 'ide' as const
 
+  /**
+   * Optional persistence hook (contract A18/B7): the manager can assign this to
+   * persist a rotated token so a new refresh_token is not lost on restart.
+   */
+  onTokenRefreshed?: (info: TokenRefreshInfo) => void | Promise<void>
+
   private databasePaths(): string[] {
     const paths: string[] = []
     const appNames = ['Antigravity IDE', 'Antigravity', 'Google Antigravity', 'antigravity', 'Antigravity - Insiders']
@@ -151,7 +195,7 @@ export class AntigravityProvider implements IQuotaProvider {
     return null
   }
 
-  private async activeToken(token: OAuthTokenInfo, config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<string> {
+  private async activeToken(token: OAuthTokenInfo, config: QuotaConfig, accountConfig?: AccountConfigItem, signal?: AbortSignal): Promise<string> {
     if (token.accessToken && (!token.expiry || token.expiry * 1000 > Date.now() + 60_000)) {
       return token.accessToken
     }
@@ -172,6 +216,7 @@ export class AntigravityProvider implements IQuotaProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      signal,
     }, config.httpProxy, 15000, config.proxyMode)
 
     if (!res.ok) {
@@ -197,10 +242,18 @@ export class AntigravityProvider implements IQuotaProvider {
       config.antigravity.oauth.expiresAt = expiresAt
     }
 
+    // Persist through the optional manager hook so a rotated refresh_token is not
+    // lost on restart (A18). Missing hook is not an error.
+    if (this.onTokenRefreshed) {
+      try {
+        await this.onTokenRefreshed({ accessToken: newAccessToken, refreshToken: token.refreshToken, expiresAt })
+      } catch {}
+    }
+
     return newAccessToken
   }
 
-  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem, signal?: AbortSignal): Promise<TestConnectionResult> {
     const start = Date.now()
     const tokenInfo = this.loadToken(config, accountConfig)
     if (!tokenInfo) {
@@ -212,7 +265,7 @@ export class AntigravityProvider implements IQuotaProvider {
     }
 
     try {
-      const accessToken = await this.activeToken(tokenInfo, config, accountConfig)
+      const accessToken = await this.activeToken(tokenInfo, config, accountConfig, signal)
       const hubUa = buildHubUserAgent()
       const res = await fetchWithProxy('https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary', {
         method: 'POST',
@@ -223,6 +276,7 @@ export class AntigravityProvider implements IQuotaProvider {
           'X-Goog-Api-Client': 'antigravity',
         },
         body: '{}',
+        signal,
       }, config.httpProxy, 10000, config.proxyMode)
 
       const latencyMs = Date.now() - start
@@ -233,6 +287,17 @@ export class AntigravityProvider implements IQuotaProvider {
           (g.displayName || '').toLowerCase().includes('argon') || (g.displayName || '').toLowerCase().includes('gemini 4')
         )
         const accountDesc = tokenInfo.email || config.antigravity?.oauth?.email || '已连接'
+        if (groupCount === 0) {
+          // 200 with no groups means the endpoint answered but gave no quota data;
+          // reporting "连接成功" here would be a false positive (A26).
+          return {
+            ok: false,
+            provider: 'antigravity',
+            latencyMs,
+            account: accountDesc,
+            message: `接口在线，但未返回任何额度分组（HTTP ${res.status}）`,
+          }
+        }
         const poolSummary = hasArgon ? '已获取全部额度池 (包含 Gemini 4 Argon)' : `已连接 (${groupCount} 个额度分组)`
         return {
           ok: true,
@@ -259,7 +324,7 @@ export class AntigravityProvider implements IQuotaProvider {
     }
   }
 
-  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
+  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem, signal?: AbortSignal): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'antigravity'
     const cardName = accountConfig?.name || config.customNames?.antigravity || config.antigravity?.name || 'Google Antigravity'
     const tokenInfo = this.loadToken(config, accountConfig)
@@ -280,7 +345,7 @@ export class AntigravityProvider implements IQuotaProvider {
     }
 
     try {
-      const accessToken = await this.activeToken(tokenInfo, config, accountConfig)
+      const accessToken = await this.activeToken(tokenInfo, config, accountConfig, signal)
 
       // Try fetching profile if email is not known
       let accountEmail = tokenInfo.email || config.antigravity?.oauth?.email
@@ -288,6 +353,7 @@ export class AntigravityProvider implements IQuotaProvider {
         try {
           const infoRes = await fetchWithProxy('https://www.googleapis.com/oauth2/v2/userinfo', {
             headers: { Authorization: `Bearer ${accessToken}` },
+            signal,
           }, config.httpProxy, 8000, config.proxyMode)
           if (infoRes.ok) {
             const info = await infoRes.json() as any
@@ -324,6 +390,7 @@ export class AntigravityProvider implements IQuotaProvider {
               'X-Goog-Api-Client': 'antigravity',
             },
             body: '{}',
+            signal,
           }, config.httpProxy, 15000, config.proxyMode)
 
           if (res.ok) {
@@ -339,7 +406,6 @@ export class AntigravityProvider implements IQuotaProvider {
       }
 
       const groups: MetricGroup[] = []
-      let hasArgonPool = false
 
       if (summaryData?.groups && Array.isArray(summaryData.groups)) {
         for (const g of summaryData.groups) {
@@ -349,32 +415,34 @@ export class AntigravityProvider implements IQuotaProvider {
           const isGemini = !isArgon && nameLower.includes('gemini')
           const isClaude = nameLower.includes('claude') || nameLower.includes('gpt')
           const poolType = isArgon ? 'argon' : (isGemini ? 'gemini' : (isClaude ? 'claude_gpt' : 'general'))
-          if (isArgon) hasArgonPool = true
 
           for (const b of (g.buckets || [])) {
-            const frac = typeof b.remainingFraction === 'number' ? b.remainingFraction : (b.remainingFraction !== undefined ? Number(b.remainingFraction) : undefined)
-            const hasFrac = frac !== undefined && !isNaN(frac)
-            const rem = hasFrac ? Math.max(0, Math.min(100, Math.round(frac * 100))) : 0
+            // `remainingFraction: null` / missing must stay unknown: Number(null) is 0,
+            // which used to fabricate a "0% remaining / exhausted" bucket (A4).
+            const frac = parseFinite(b.remainingFraction)
+            const hasFrac = frac !== undefined
+            const rem = hasFrac ? clampPercent(frac! * 100) : undefined
+            const resetAt = normalizeResetAt(b.resetTime)
             const isWeekly = b.window === 'WINDOW_WEEKLY' || (b.displayName && b.displayName.toLowerCase().includes('weekly')) || (b.bucketId && b.bucketId.toLowerCase().includes('weekly'))
             const is5Hour = b.window === 'WINDOW_5_HOUR' || b.window === 'WINDOW_5H' || (b.displayName && (b.displayName.toLowerCase().includes('5h') || b.displayName.toLowerCase().includes('five')))
             const windowKind = isWeekly ? 'weekly' : (is5Hour ? '5h' : 'unknown')
 
             let winId = b.bucketId || (isArgon ? 'argon-weekly' : (isGemini ? (isWeekly ? 'gemini-weekly' : 'gemini-5h') : (isClaude ? (isWeekly ? 'claude-weekly' : 'claude-5h') : (isWeekly ? 'weekly' : '5h'))))
 
-            const status = !hasFrac ? 'unknown' : (rem <= 0 ? 'exhausted' : 'active')
             const label = isWeekly ? (isArgon ? 'Weekly Limit (Argon)' : 'Weekly Limit') : (is5Hour ? '5-Hour Limit' : (b.displayName || 'Quota Limit'))
-            const subtitle = hasFrac ? formatQuotaResetText(b.resetTime, 100 - rem, Boolean(isWeekly)) : '额度状态未知'
+            const subtitle = hasFrac ? formatQuotaResetText(resetAt, 100 - rem!, Boolean(isWeekly)) : '额度状态未知'
 
             if (!windows.some(w => w.id === winId)) {
               windows.push({
                 id: winId,
                 label,
                 subtitle,
-                usedPercent: 100 - rem,
-                remainingPercent: rem,
-                resetAt: b.resetTime,
+                ...(hasFrac
+                  ? { usedPercent: 100 - rem!, remainingPercent: rem!, quotaKind: 'usage' as const }
+                  : { quotaKind: 'unknown' as const }),
+                resetAt,
                 barType: 'circle',
-                status,
+                status: !hasFrac ? 'unknown' : (rem! <= 0 ? 'exhausted' : 'active'),
                 rawFraction: frac,
                 windowKind,
                 bucketId: b.bucketId,
@@ -397,6 +465,7 @@ export class AntigravityProvider implements IQuotaProvider {
       }
 
       // Fallback endpoint if retrieveUserQuotaSummary is empty
+      let usedModelFallback = false
       if (groups.length === 0) {
         const modelEndpoints = [
           'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
@@ -414,6 +483,7 @@ export class AntigravityProvider implements IQuotaProvider {
                 'X-Goog-Api-Client': 'antigravity',
               },
               body: '{}',
+              signal,
             }, config.httpProxy, 15000, config.proxyMode)
             if (res.ok) {
               modelData = await res.json()
@@ -430,14 +500,16 @@ export class AntigravityProvider implements IQuotaProvider {
 
           for (const [id, model] of Object.entries(modelData.models) as Array<[string, any]>) {
             const quota = model?.quotaInfo
-            if (typeof quota?.remainingFraction !== 'number') continue
-            const rem = Math.max(0, Math.min(100, Math.round(quota.remainingFraction * 100)))
+            const frac = parseFinite(quota?.remainingFraction)
+            if (frac === undefined) continue
+            const rem = clampPercent(frac * 100)
+            const resetAt = normalizeResetAt(quota?.resetTime)
             const isWeekly = id.toLowerCase().includes('weekly') || (model.displayName && model.displayName.toLowerCase().includes('weekly'))
             const is5Hour = id.toLowerCase().includes('five') || id.toLowerCase().includes('5hour') || (model.displayName && model.displayName.toLowerCase().includes('five'))
             const isArgon = id.toLowerCase().includes('argon') || (model.displayName && model.displayName.toLowerCase().includes('argon'))
             const isGemini = !isArgon && id.toLowerCase().includes('gemini')
             const cleanLabel = isWeekly ? (isArgon ? 'Weekly Limit (Argon)' : 'Weekly Limit') : is5Hour ? '5-Hour Limit' : (model.displayName || id)
-            const subtitle = formatQuotaResetText(quota.resetTime, 100 - rem, Boolean(isWeekly))
+            const subtitle = formatQuotaResetText(resetAt, 100 - rem, Boolean(isWeekly))
             
             const winId = isArgon
               ? (isWeekly ? 'argon-weekly' : 'argon-5h')
@@ -453,10 +525,11 @@ export class AntigravityProvider implements IQuotaProvider {
                 subtitle,
                 usedPercent: 100 - rem,
                 remainingPercent: rem,
-                resetAt: quota.resetTime,
+                quotaKind: 'usage',
+                resetAt,
                 barType: 'circle',
                 status: rem <= 0 ? 'exhausted' : 'active',
-                rawFraction: quota.remainingFraction,
+                rawFraction: frac,
                 windowKind: isWeekly ? 'weekly' : (is5Hour ? '5h' : 'unknown'),
                 bucketId: id,
                 modelFamily: isArgon ? 'gemini-4-argon' : (isGemini ? 'gemini' : 'claude'),
@@ -468,27 +541,76 @@ export class AntigravityProvider implements IQuotaProvider {
           if (claudeGptWindows.length > 0) groups.push({ id: 'antigravity-pool-claude', title: 'Claude and GPT models', poolType: 'claude_gpt', hasInfoIcon: true, windows: claudeGptWindows })
           if (argonWindows.length > 0) {
             groups.push({ id: 'antigravity-pool-argon', title: 'Gemini 4 Argon', poolType: 'argon', hasInfoIcon: true, windows: argonWindows })
-            hasArgonPool = true
           }
         }
+        // The numbers above came from the degraded model endpoint, not the summary.
+        usedModelFallback = groups.length > 0
       }
+
+      const endpointForProvenance = successfulEndpoint || summaryEndpoints[0]!
+      let provenanceHost: string | undefined
+      try {
+        provenanceHost = new URL(endpointForProvenance).hostname
+      } catch {}
 
       if (groups.length === 0 && lastFetchErr) {
         throw new Error(`无法获取额度明细 (${lastFetchErr})。若处于受限网络，请在设置中配置 HTTP 代理。`)
       }
 
+      if (groups.length === 0) {
+        // A 200 with no groups on either endpoint is a data gap, not a transport
+        // failure: surface it as a partial card instead of a blank "ok" (A26).
+        return {
+          card: {
+            id: cardId,
+            name: cardName,
+            provider: 'antigravity',
+            category: this.category,
+            status: 'ok',
+            plan: summaryData?.plan || undefined,
+            account: accountEmail,
+            groups: [
+              {
+                id: 'antigravity-no-data',
+                title: '额度数据不可用',
+                hasInfoIcon: true,
+                poolType: 'general',
+                windows: [
+                  {
+                    id: 'antigravity-unknown',
+                    label: '额度数据',
+                    subtitle: '上游未返回任何额度分组，无法量化',
+                    quotaKind: 'unknown',
+                    status: 'unknown',
+                    barType: 'circle',
+                  },
+                ],
+              },
+            ],
+            lastUpdated: Date.now(),
+            sourceProvenance: {
+              endpoint: endpointForProvenance,
+              method: Array.isArray(summaryData?.groups) ? 'official-summary' : 'model-fallback',
+              timestamp: Date.now(),
+              partial: true,
+              host: provenanceHost,
+            },
+          },
+        }
+      }
+
       // Overall card status describes reachability and pressure, never "exhausted":
       // `error` is reserved for failed collection so the alarm layer cannot report a
       // quota-exhausted account as "connection failed / credential invalid".
-      const allWindows = groups.flatMap(g => g.windows)
-      const isAnyLow = allWindows.some(w => w.remainingPercent > 0 && w.remainingPercent <= (config.alarmThresholdPercent ?? 15))
-      const isAllExhausted = allWindows.length > 0 && allWindows.every(w => w.remainingPercent <= 0)
-      const cardStatus = allWindows.length === 0 ? 'ok' : (isAnyLow || isAllExhausted ? 'warn' : 'ok')
+      // Only real quota ratios may drive pressure status; unknown windows are ignored.
+      const quantified = groups.flatMap(g => g.windows).filter(isQuantified)
+      const isAnyLow = quantified.some(w => w.remainingPercent <= (config.alarmThresholdPercent ?? 15))
+      const cardStatus = isAnyLow ? 'warn' : 'ok'
       // Never guess the subscription tier: Argon presence is a quota-group fact, not a plan name.
       const planName = summaryData?.plan || undefined
       // Partial only when a degraded branch produced the numbers; a 2-group Ultra account
       // is a complete answer, not a partial one.
-      const usedFallback = groups.length > 0 && !Array.isArray(summaryData?.groups)
+      const usedFallback = usedModelFallback
 
       return {
         card: {
@@ -502,11 +624,11 @@ export class AntigravityProvider implements IQuotaProvider {
           groups,
           lastUpdated: Date.now(),
           sourceProvenance: {
-            endpoint: successfulEndpoint,
+            endpoint: endpointForProvenance,
             method: usedFallback ? 'model-fallback' : 'official-summary',
             timestamp: Date.now(),
             partial: usedFallback,
-            host: successfulEndpoint ? new URL(successfulEndpoint).hostname : undefined,
+            host: provenanceHost,
           },
         },
       }
@@ -518,7 +640,6 @@ export class AntigravityProvider implements IQuotaProvider {
           provider: 'antigravity',
           category: this.category,
           status: 'error',
-          plan: '已连接',
           account: tokenInfo.email || config.antigravity?.oauth?.email,
           error: err.message,
           groups: [],

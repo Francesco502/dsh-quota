@@ -15,8 +15,14 @@ const check = (ok, message) => {
   if (!ok) failures.push(message)
 }
 
-const tagArg = process.argv.find((arg) => arg.startsWith('--tag='))
-const tag = tagArg ? tagArg.slice('--tag='.length) : process.env.GITHUB_REF_NAME ?? process.env.npm_config_tag
+const argv = process.argv.slice(2)
+const tagFlagIndex = argv.indexOf('--tag')
+const inlineTag = argv.find((arg) => arg.startsWith('--tag='))
+const tag =
+  (inlineTag ? inlineTag.slice('--tag='.length) : undefined) ??
+  (tagFlagIndex >= 0 ? argv[tagFlagIndex + 1] : undefined) ??
+  process.env.GITHUB_REF_NAME ??
+  process.env.npm_config_tag
 
 if (!tag) {
   console.error('validate-release: provide --tag vX.Y.Z or GITHUB_REF_NAME')
@@ -36,8 +42,8 @@ check(typeof pkg.engines?.dsh === 'string', 'engines.dsh must declare the compat
 check(Array.isArray(pkg.files) && pkg.files.includes('lib'), 'files must include lib')
 
 const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8')
-check(new RegExp(`(?m)^## \\[Unreleased\\]\\s*$`).test(changelog), 'CHANGELOG.md must keep an [Unreleased] section')
-const heading = new RegExp(`(?m)^## \\[${version.replace(/\./g, '\\.')}\\] - \\d{4}-\\d{2}-\\d{2}\\s*$`)
+check(/^## \[Unreleased\]\s*$/m.test(changelog), 'CHANGELOG.md must keep an [Unreleased] section')
+const heading = new RegExp(`^## \\[${version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\] - \\d{4}-\\d{2}-\\d{2}\\s*$`, 'm')
 check(heading.test(changelog), `CHANGELOG.md must contain "## [${version}] - YYYY-MM-DD"`)
 
 for (const file of ['lib/index.js', 'lib/client.js', 'lib/index.js.map', 'lib/client.js.map']) {

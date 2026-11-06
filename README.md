@@ -1,10 +1,10 @@
 # @francescoli/dsh-quota: DSH AI 额度与用量监控插件
 
-[![version](https://img.shields.io/badge/version-v0.4.0-blue.svg)](./package.json)
+[![version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](./package.json)
 [![npm](https://img.shields.io/badge/npm-@francescoli/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francescoli/dsh-quota)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-> 当前版本：**v0.4.0**
+> 当前版本：**v0.4.1**
 
 专门为 **DeepSeek Harness (DSH)** 打造的全功能 AI 服务额度、余额与用量监控插件。集中监控并展示 **DeepSeek 官方平台**、**Cursor**、**Codex (ChatGPT)**、**Google Antigravity**、**GitHub Copilot**、**OpenAI Platform**、**Anthropic Claude**、**Kimi**、**智谱 GLM**、**MiniMax**、**阿里通义千问**、**火山方舟**、**OpenCode-Go** 及 **OneAPI / NewAPI** 兼容中转的实时剩余额度、用量、充值余额、消耗速率及重置周期。
 
@@ -21,15 +21,30 @@
    - **HUD 悬浮环**：支持鼠标悬停暂停轮播、数字平滑过渡、视口边界防溢出自动翻转、贴边微缩模式；
    - **设置与测活**：为所有 Provider 提供一键「测试连接」与毫秒级延迟反馈。
 3. **时序统计与智能预警**：
-   - 本地 30 天时序历史采样记录；
+   - 本地 30 天时序历史采样记录（append-only JSONL，写入不阻塞请求）；
    - 自动计算近 24 小时平均消耗速率 (%/h) 与预估可用剩余时长；
    - 多级阈值告警与侧边栏「额度监控」动态小红点 Badge 联动。
 4. **DSH Agent 深度协同**：
    - 注册 `get_quota_status` Agent Tool，支持在对话中直接让 AI 查额度与获取模型可用状态。
 5. **安全与性能加固**：
-   - 独立 Provider TTL 缓存池，单服务网络超时不阻塞全局；
-   - 配置文件严格保存在本地 `~/.dsh/quota-config.json`（权限 `0600`）；
-   - 彻底支持跨平台路径解析与 Node.js SQLite 优雅降级。
+   - 插件 API 统一守卫（`X-DSH-Quota` 头 + 回环 Host + 同源 Origin + 写入仅 JSON），阻断跨站改写配置；
+   - 用户自填的 `baseUrl` 经安全校验（拒绝非 http(s)、云元数据与链路本地地址，允许本机/内网中转）；
+   - 独立 Provider TTL 缓存池 + 整轮/实例双层 single-flight，单服务网络超时不阻塞全局；
+   - 配置文件保存在本地 `~/.dsh/quota-config.json`，密钥拆分到 `quota-secrets.json`（均 `0600`）；
+   - 历史数据写入 append-only `~/.dsh/quota-history.jsonl`，30 天/单 key 2000 点自动裁剪与每日 compaction。
+6. **原生 UI 与国际化**：
+   - 通过宿主官方 slots 注册主面板、侧边栏入口、折叠栏告警角标与底部快捷入口（旧宿主自动回退 DOM 挂载）；
+   - 壳层文案支持中英切换（`dsh-quota` locale 命名空间）。
+
+---
+
+## 🆕 v0.4.1 更新要点
+
+- **修复升级后插件同步失败**（`loaded without registering "@francescoli/dsh-quota"`）：客户端产物改为 IIFE 单模块，重复执行安全；构建加闸门、CI 加测试。
+- **额度数据不再造假**：新增 `quotaKind` 能力模型，余额类只显示金额、连通性类明确标注「仅连通性」、缺字段显示「—」而不是 0%/100%。
+- **安全修复**：跨站 CSRF 改写配置（含代理）与 `baseUrl` 盲 SSRF。
+- **性能**：历史文件从每 2 分钟全量重写改为增量追加；`force` 刷新去重与限流。
+- **桌面版**：新增 Desktop profile 安装说明与 API base 自适应。
 
 ---
 
@@ -54,6 +69,19 @@ dsh plugin --profile web add @francescoli/dsh-quota
 dsh plugin --profile web add github:Francesco502/dsh-quota
 ```
 
+### 桌面版（Desktop）安装
+
+桌面版使用**独立的 Desktop profile**，且 npm 版 CLI 会拒绝管理它（`profile "desktop" is managed exclusively by the Electron application`）。正确步骤：
+
+1. 安装并**启动一次** DeepSeek Harness Desktop，让它初始化 `$DSH_HOME/profiles/desktop`，然后**完全退出**应用；
+2. 用 **Desktop 自带的命令运行时**（不是 Homebrew / npm 安装的 `dsh`）执行：
+   ```bash
+   dsh plugin --profile desktop add @francescoli/dsh-quota@0.4.1
+   ```
+3. 重新打开 Desktop。
+
+> 桌面版与 Web 版共享 `$DSH_HOME` 下的数据文件（配置、历史），但不共享插件安装目录；两端升级需要各自执行一次。
+
 ---
 
 ## 🛠️ 构建与发布验证
@@ -61,7 +89,8 @@ dsh plugin --profile web add github:Francesco502/dsh-quota
 ```bash
 npm run build
 npm test
-pwsh -File .github/scripts/validate-release.ps1 -Tag v0.3.1
+npm run build && npm test
+npm run validate:release -- --tag v0.4.1
 ```
 
 ---

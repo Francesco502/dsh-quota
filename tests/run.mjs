@@ -34,7 +34,7 @@ import {
   DEFAULT_PROVIDER_ORDER,
 } from '../lib/index.js'
 
-console.log('Running dsh-quota v0.4.0 test suite...')
+console.log('Running dsh-quota v0.4.1 test suite...')
 
 // 1. Percentage calculation
 const calcPercent = (used, total) => {
@@ -495,4 +495,4 @@ try {
   await new Promise((resolve) => testServer.close(resolve))
 }
 
-console.log('🎉 All dsh-quota v0.4.0 tests passed successfully!')
+console.log('🎉 All dsh-quota v0.4.1 tests passed successfully!')

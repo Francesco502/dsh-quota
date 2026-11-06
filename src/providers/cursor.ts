@@ -1,5 +1,5 @@
-import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
-import { formatQuotaResetText } from '../core/types.ts'
+import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem, MetricWindow } from '../core/types.ts'
+import { formatQuotaResetText, isQuantified } from '../core/types.ts'
 import { getAppStoragePaths } from '../core/paths.ts'
 import { fetchWithProxy } from '../core/fetch.ts'
 import { existsSync } from 'node:fs'
@@ -10,6 +10,31 @@ interface CursorLogin {
   userId: string
   email?: string
   membershipType?: string
+}
+
+/** Parse an upstream numeric field without ever turning null/undefined into 0. */
+function parseFinite(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+/**
+ * Cursor's billing endpoints are inconsistent about units: `currentPeriodEnd` is
+ * epoch seconds, but relays/older responses sometimes send milliseconds. Values
+ * below 1e11 are seconds (1e11 ms is 1973; 1e11 s is year 5138).
+ */
+function normalizeEpochMs(value: unknown): number | undefined {
+  const parsed = parseFinite(value)
+  if (parsed === undefined || parsed <= 0) return undefined
+  return parsed < 1e11 ? Math.round(parsed * 1000) : Math.round(parsed)
 }
 
 export class CursorProvider implements IQuotaProvider {
@@ -80,7 +105,7 @@ export class CursorProvider implements IQuotaProvider {
     return { cookie: '' }
   }
 
-  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem, signal?: AbortSignal): Promise<TestConnectionResult> {
     const start = Date.now()
     const { cookie, email } = this.resolveCookie(config, accountConfig)
     if (!cookie) {
@@ -93,7 +118,7 @@ export class CursorProvider implements IQuotaProvider {
 
     try {
       const headers = { Cookie: cookie, Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' }
-      const res = await fetchWithProxy('https://cursor.com/api/usage-summary', { headers }, config.httpProxy, 12000)
+      const res = await fetchWithProxy('https://cursor.com/api/usage-summary', { headers, signal }, config.httpProxy, 12000, config.proxyMode)
       const latencyMs = Date.now() - start
       if (!res.ok) {
         return {
@@ -121,7 +146,7 @@ export class CursorProvider implements IQuotaProvider {
     }
   }
 
-  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
+  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem, signal?: AbortSignal): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'cursor'
     const cardName = accountConfig?.name || 'Cursor'
     const { cookie, email, membershipType } = this.resolveCookie(config, accountConfig)
@@ -143,39 +168,90 @@ export class CursorProvider implements IQuotaProvider {
 
     try {
       const headers = { Cookie: cookie, Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' }
-      const [usageRes, stripeRes] = await Promise.all([
-        fetchWithProxy('https://cursor.com/api/usage-summary', { headers }, config.httpProxy, 12000),
-        fetchWithProxy('https://cursor.com/api/auth/stripe', { headers }, config.httpProxy, 12000),
+      // Billing is optional: a failing stripe endpoint must not hide real usage.
+      const [usageSettled, stripeSettled] = await Promise.allSettled([
+        fetchWithProxy('https://cursor.com/api/usage-summary', { headers, signal }, config.httpProxy, 12000, config.proxyMode),
+        fetchWithProxy('https://cursor.com/api/auth/stripe', { headers, signal }, config.httpProxy, 12000, config.proxyMode),
       ])
 
+      if (usageSettled.status === 'rejected') {
+        throw new Error(usageSettled.reason?.message || 'Cursor 用量接口请求失败')
+      }
+      const usageRes = usageSettled.value
       if (!usageRes.ok) throw new Error(`Cursor 登录态失效或接口错误 (${usageRes.status})`)
       const data = await usageRes.json() as any
-      const stripe = stripeRes.ok ? await stripeRes.json() as any : {}
-      const plan = data.individualUsage?.plan
-      if (!plan?.enabled) throw new Error('Cursor 当前账户未返回可用订阅额度')
+      const stripe = stripeSettled.status === 'fulfilled' && stripeSettled.value.ok
+        ? await stripeSettled.value.json().catch(() => ({}))
+        : {}
 
-      const autoPercent = Math.max(0, Math.min(100, Math.round(plan.autoPercentUsed ?? plan.totalPercentUsed ?? 0)))
-      const apiPercent = Math.max(0, Math.min(100, Math.round(plan.apiPercentUsed ?? 0)))
-      const autoRemaining = Math.max(0, 100 - autoPercent)
-      const apiRemaining = Math.max(0, 100 - apiPercent)
+      const plan = data?.individualUsage?.plan
+      // A missing plan means "no subscription data", not "credentials broken".
+      if (!plan || plan.enabled === false) {
+        return {
+          card: {
+            id: cardId,
+            name: cardName,
+            provider: 'cursor',
+            category: this.category,
+            status: 'disabled',
+            plan: (stripe.membershipType ?? data.membershipType ?? membershipType ?? 'Cursor').toUpperCase(),
+            account: email || stripe.paymentId,
+            error: 'Cursor 当前账户未返回可用订阅额度（Free / 团队套餐可能不开放该接口）',
+            groups: [],
+            lastUpdated: Date.now(),
+          },
+        }
+      }
 
-      let resetTimestamp: number | undefined
-      if (stripe?.currentPeriodEnd) {
-        resetTimestamp = stripe.currentPeriodEnd * 1000
-      } else if (data?.startOfMonth) {
+      // Percent fields may be null/renamed: those windows stay `unknown` instead of
+      // reporting a fabricated "100% remaining".
+      const autoUsed = parseFinite(plan.autoPercentUsed) ?? parseFinite(plan.totalPercentUsed)
+      const apiUsed = parseFinite(plan.apiPercentUsed)
+
+      // `currentPeriodEnd` may already be milliseconds; normalize both units.
+      let resetTimestamp = normalizeEpochMs(stripe?.currentPeriodEnd)
+      if (resetTimestamp === undefined && data?.startOfMonth) {
         const d = new Date()
         d.setMonth(d.getMonth() + 1, 1)
         d.setHours(0, 0, 0, 0)
         resetTimestamp = d.getTime()
       }
 
-      const autoSubtitle = resetTimestamp
-        ? formatQuotaResetText(resetTimestamp, autoPercent, true)
-        : (autoRemaining < 100 ? `已用 ${autoPercent}% · 包含 Composer / Grok` : '已用 0% · 额度充足')
+      const buildWindow = (windowId: string, label: string, usedRaw: number | undefined, resetMs: number | undefined, isWeekly: boolean, detail: string): MetricWindow => {
+        if (usedRaw === undefined) {
+          return {
+            id: windowId,
+            label,
+            subtitle: '额度字段缺失 · 状态未知',
+            quotaKind: 'unknown',
+            status: 'unknown',
+            barType: 'circle',
+          }
+        }
+        const used = clampPercent(usedRaw)
+        const remaining = 100 - used
+        return {
+          id: windowId,
+          label,
+          subtitle: `${formatQuotaResetText(resetMs, used, isWeekly)} · ${detail}`,
+          usedPercent: used,
+          remainingPercent: remaining,
+          quotaKind: 'usage',
+          resetAt: resetMs !== undefined ? new Date(resetMs).toISOString() : undefined,
+          barType: 'circle',
+          status: remaining <= 0 ? 'exhausted' : 'active',
+        }
+      }
 
-      const apiSubtitle = apiRemaining < 100
-        ? `已用 ${apiPercent}% · 包含 $20 API 用量`
-        : '已用 0% · 额度充足'
+      const windows: MetricWindow[] = [
+        buildWindow('cursor-auto', 'Fast Requests (Cursor 核心模型)', autoUsed, resetTimestamp, true, '包含 Composer / Grok'),
+        // No hardcoded dollar amount: the API window has no fixed $20 allowance.
+        buildWindow('cursor-named', 'Other Models (其他通用模型)', apiUsed, undefined, true, '其他通用模型'),
+      ]
+
+      // warn tracks the worst quantified window (auto OR api), not just auto.
+      const quantified = windows.filter(isQuantified)
+      const lowestRemaining = quantified.length > 0 ? Math.min(...quantified.map(w => w.remainingPercent)) : undefined
 
       return {
         card: {
@@ -183,31 +259,13 @@ export class CursorProvider implements IQuotaProvider {
           name: cardName,
           provider: 'cursor',
           category: this.category,
-          status: autoRemaining <= 15 ? 'warn' : 'ok',
+          status: lowestRemaining !== undefined && lowestRemaining <= (config.alarmThresholdPercent ?? 15) ? 'warn' : 'ok',
           plan: (stripe.membershipType ?? data.membershipType ?? membershipType ?? 'Cursor').toUpperCase(),
           account: email || stripe.paymentId,
           groups: [
             {
               title: 'Cursor Plan Usage',
-              windows: [
-                {
-                  id: 'cursor-auto',
-                  label: 'Fast Requests (Cursor 核心模型)',
-                  subtitle: autoSubtitle,
-                  usedPercent: autoPercent,
-                  remainingPercent: autoRemaining,
-                  resetAt: resetTimestamp ? new Date(resetTimestamp).toISOString() : undefined,
-                  barType: 'circle',
-                },
-                {
-                  id: 'cursor-named',
-                  label: 'Other Models (其他通用模型)',
-                  subtitle: apiSubtitle,
-                  usedPercent: apiPercent,
-                  remainingPercent: apiRemaining,
-                  barType: 'circle',
-                },
-              ],
+              windows,
             },
           ],
           lastUpdated: Date.now(),
@@ -221,7 +279,6 @@ export class CursorProvider implements IQuotaProvider {
           provider: 'cursor',
           category: this.category,
           status: 'error',
-          plan: '已连接',
           account: email,
           error: err.message,
           groups: [],

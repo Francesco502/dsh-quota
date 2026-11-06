@@ -65,8 +65,10 @@ export class OAuthManager {
 
   private codexVerifier: string | null = null
   private codexState: string | null = null
+  private codexAuthUrl: string | null = null
 
   private antigravityState: string | null = null
+  private antigravityAuthUrl: string | null = null
 
   public dispose(): void {
     if (this.codexAutoCloseTimer) {
@@ -83,6 +85,7 @@ export class OAuthManager {
         this.activeCodexServer.close()
       } catch {}
       this.activeCodexServer = null
+      this.codexAuthUrl = null
     }
     if (this.activeAntigravityServer) {
       try {
@@ -90,6 +93,7 @@ export class OAuthManager {
         this.activeAntigravityServer.close()
       } catch {}
       this.activeAntigravityServer = null
+      this.antigravityAuthUrl = null
     }
   }
 
@@ -99,6 +103,12 @@ export class OAuthManager {
     proxyUrl?: string,
     proxyMode?: any
   ): Promise<{ authUrl: string }> {
+    // Single-flight: a second click must not tear down the callback server that is
+    // already waiting for the browser redirect.
+    if (this.activeCodexServer !== null && this.codexAuthUrl !== null) {
+      return { authUrl: this.codexAuthUrl }
+    }
+
     if (this.codexAutoCloseTimer) {
       clearTimeout(this.codexAutoCloseTimer)
       this.codexAutoCloseTimer = null
@@ -116,7 +126,14 @@ export class OAuthManager {
     const codeChallenge = base64UrlEncode(sha256(this.codexVerifier))
 
     const clientId = 'app_EMoamEEZ73f0CkXaXp7hrann'
-    const redirectUri = 'http://localhost:1455/auth/callback'
+    // The redirect URI must name the port the callback server actually binds.
+    // OpenAI's client only accepts its registered loopback callback, so a busy
+    // 1455 is reported to the user instead of silently switching to 1456.
+    const codexPort = await findAvailablePort([1455], '127.0.0.1')
+    if (codexPort !== 1455) {
+      throw new Error('Codex 登录需要本机 1455 端口，当前已被其他进程占用。请释放该端口后重试。')
+    }
+    const redirectUri = `http://localhost:${codexPort}/auth/callback`
 
     const params = new URLSearchParams({
       response_type: 'code',
@@ -131,7 +148,7 @@ export class OAuthManager {
     const authUrl = `https://auth.openai.com/oauth/authorize?${params.toString()}`
 
     const server = http.createServer(async (req, res) => {
-      const url = new URL(req.url || '/', 'http://localhost:1455')
+      const url = new URL(req.url || '/', `http://localhost:${codexPort}`)
       if (url.pathname === '/auth/callback') {
         const code = url.searchParams.get('code')
         const state = url.searchParams.get('state')
@@ -211,9 +228,9 @@ export class OAuthManager {
     })
 
     this.activeCodexServer = server
-    const port = await findAvailablePort([1455, 1456, 0], '127.0.0.1')
-    await new Promise<void>((resolve) => {
-      server.listen(port, '127.0.0.1', () => resolve())
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(codexPort, '127.0.0.1', () => resolve())
     })
 
     // Auto close server after 5 minutes if user abandons
@@ -236,6 +253,10 @@ export class OAuthManager {
     proxyUrl?: string,
     proxyMode?: any
   ): Promise<{ authUrl: string }> {
+    if (this.activeAntigravityServer !== null && this.antigravityAuthUrl !== null) {
+      return { authUrl: this.antigravityAuthUrl }
+    }
+
     if (this.antigravityAutoCloseTimer) {
       clearTimeout(this.antigravityAutoCloseTimer)
       this.antigravityAutoCloseTimer = null
@@ -361,6 +382,7 @@ export class OAuthManager {
           this.activeAntigravityServer.close()
         } catch {}
         this.activeAntigravityServer = null
+        this.antigravityAuthUrl = null
       }
     }, 300_000)
 
@@ -384,6 +406,7 @@ export class OAuthManager {
 
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
 
+    this.antigravityAuthUrl = authUrl
     return { authUrl }
   }
 }

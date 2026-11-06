@@ -12,7 +12,7 @@
   - `README.md` 中的版本徽章、`CHANGELOG.md` 对应发布段落必须与 `package.json` 的版本号保持严格一致。
 - **发布前校验**：必须通过本地或 CI 的发布校验脚本：
   ```powershell
-  & .github/scripts/validate-release.ps1 -Tag vX.Y.Z
+  npm run validate:release -- --tag vX.Y.Z
   ```
 
 ---
@@ -69,17 +69,18 @@ Git 标签必须严格遵循带 `v` 前缀的格式，例如 `v0.1.0`、`v0.1.1`
 在创建版本 Git 标签之前，必须满足以下所有门禁条件：
 
 1. **代码与工作区整洁**：所有开发代码已通过审查并提交至 `main` 分支，工作区无未提交的脏更改。
-2. **构建通过**：运行 `npm run build`，确保 `lib/index.js` 与 `lib/client.js` 构建成功且无编译报错。
+2. **构建与测试通过**：运行 `npm run build` 与 `npm test`，确保 `lib/` 产物可复现（CI 会执行 `git diff --exit-code -- lib/`）且全量测试通过。
 3. **版本元数据一致**：`package.json`、`CHANGELOG.md`、`README.md` 中的版本号完全一致。
-4. **自动化校验脚本通过**：
-   ```powershell
-   & .github/scripts/validate-release.ps1 -Tag vX.Y.Z
+4. **自动化校验脚本通过**（跨平台 Node 脚本，CI 与本机一致）：
+   ```bash
+   npm run validate:release -- --tag vX.Y.Z
    ```
    脚本将执行以下硬性检查：
    - Tag 格式符合 `^v\d+\.\d+\.\d+$`；
    - `package.json` 中的 `version` 与 Tag 一致；
    - `CHANGELOG.md` 中包含对应版本的日期标题 `## [X.Y.Z] - YYYY-MM-DD` 且保留 `## [Unreleased]`；
-   - 构建产物 `lib/index.js` 与 `lib/client.js` 存在且非空。
+   - 构建产物 `lib/index.js`、`lib/client.js` 及其 source map 存在且非空；
+   - `lib/client.js` 是 classic-script IIFE、只注册一个规范 id、带 sourceMappingURL（0.4.0 事故的回归门禁）。
 
 ---
 
@@ -111,7 +112,7 @@ npm run build
 ### 步骤 4：运行本地门禁验证
 
 ```powershell
-& .github/scripts/validate-release.ps1 -Tag v0.1.0
+npm run validate:release -- --tag v0.1.0
 ```
 
 ### 步骤 5：提交发布代码并打标签

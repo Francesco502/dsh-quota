@@ -1,6 +1,30 @@
 import type { QuotaController } from './controller.ts'
-import type { AuthCardItem } from './api.ts'
-import { makeHudMetricKey } from './api.ts'
+import type { AuthCardItem, MetricWindow, QuotaConfig } from './api.ts'
+import { makeHudMetricKey, isQuantified, windowQuotaKind } from './api.ts'
+import type { QuotaKind } from './api.ts'
+
+interface HudMetric {
+  key: string
+  provider: string
+  name: string
+  tag: string
+  kind: QuotaKind
+  remainingPercent?: number
+  amountText?: string
+}
+
+function isQuantifiedMetric(metric: HudMetric): boolean {
+  return metric.kind === 'usage'
+    && typeof metric.remainingPercent === 'number'
+    && Number.isFinite(metric.remainingPercent)
+}
+
+function metricValueText(metric: HudMetric): string {
+  if (isQuantifiedMetric(metric)) return `${Math.round(metric.remainingPercent!)}% 剩余`
+  if (metric.kind === 'balance') return metric.amountText || '—'
+  if (metric.kind === 'liveness') return '仅连通性'
+  return '未知'
+}
 
 interface HudPosition {
   x: number
@@ -186,6 +210,31 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   let moved = false
   let isHovered = false
 
+  function bindDragEndListeners(): void {
+    window.addEventListener('mousemove', onPointerMove)
+    window.addEventListener('mouseup', onPointerUp)
+    window.addEventListener('touchmove', onPointerMove, { passive: false })
+    window.addEventListener('touchend', onPointerUp)
+    // Release paths that a plain mouseup/touchend can miss: pointer cancellation
+    // (mobile gestures), a window blur while dragging outside, or a system
+    // interruption. Without these `isDragging` stayed true and froze the carousel.
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerUp)
+    window.addEventListener('touchcancel', onPointerUp)
+    window.addEventListener('blur', onPointerUp)
+  }
+
+  function unbindDragEndListeners(): void {
+    window.removeEventListener('mousemove', onPointerMove)
+    window.removeEventListener('mouseup', onPointerUp)
+    window.removeEventListener('touchmove', onPointerMove)
+    window.removeEventListener('touchend', onPointerUp)
+    window.removeEventListener('pointerup', onPointerUp)
+    window.removeEventListener('pointercancel', onPointerUp)
+    window.removeEventListener('touchcancel', onPointerUp)
+    window.removeEventListener('blur', onPointerUp)
+  }
+
   function onPointerDown(e: MouseEvent | TouchEvent) {
     isDragging = true
     moved = false
@@ -199,10 +248,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     initialLeft = hudEl.offsetLeft
     initialTop = hudEl.offsetTop
 
-    window.addEventListener('mousemove', onPointerMove)
-    window.addEventListener('mouseup', onPointerUp)
-    window.addEventListener('touchmove', onPointerMove, { passive: false })
-    window.addEventListener('touchend', onPointerUp)
+    bindDragEndListeners()
   }
 
   function onPointerMove(e: MouseEvent | TouchEvent) {
@@ -229,10 +275,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     hudEl.style.cursor = 'grab'
     hudEl.style.transition = 'transform 0.16s ease, left 0.2s ease, top 0.2s ease'
 
-    window.removeEventListener('mousemove', onPointerMove)
-    window.removeEventListener('mouseup', onPointerUp)
-    window.removeEventListener('touchmove', onPointerMove)
-    window.removeEventListener('touchend', onPointerUp)
+    unbindDragEndListeners()
 
     if (!moved) {
       controller.toggle()
@@ -261,6 +304,31 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   hudEl.addEventListener('mouseleave', () => {
     isHovered = false
   })
+
+  // Window resize / monitor change: re-clamp so the HUD cannot end up off-screen.
+  function clampHudPosition(): void {
+    const maxX = Math.max(8, window.innerWidth - 54)
+    const maxY = Math.max(8, window.innerHeight - 54)
+    const currentLeft = Number.parseFloat(hudEl.style.left)
+    const currentTop = Number.parseFloat(hudEl.style.top)
+    const sourceX = Number.isFinite(currentLeft) ? currentLeft : pos.x
+    const sourceY = Number.isFinite(currentTop) ? currentTop : pos.y
+    const x = Math.min(Math.max(8, sourceX), maxX)
+    const y = Math.min(Math.max(8, sourceY), maxY)
+    if (x !== pos.x || y !== pos.y) {
+      pos = { x, y }
+      savePosition(pos)
+    }
+    hudEl.style.left = `${pos.x}px`
+    hudEl.style.top = `${pos.y}px`
+  }
+
+  const onWindowResize = (): void => {
+    clampHudPosition()
+    if (typeof document !== 'undefined' && document.hidden) return
+    render()
+  }
+  window.addEventListener('resize', onWindowResize)
 
   // Tag helper
   function getProviderTag(provider: string): string {
@@ -325,25 +393,35 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     return false
   }
 
-  function getMetricsList(cards: AuthCardItem[], config?: QuotaConfig): Array<{
-    key: string
-    provider: string
-    name: string
-    tag: string
-    remainingPercent: number
-    balanceText?: string
-  }> {
-    const list: Array<{
-      key: string
-      provider: string
-      name: string
-      tag: string
-      remainingPercent: number
-      balanceText?: string
-    }> = []
+  function formatBalanceAmount(card: AuthCardItem): string | undefined {
+    const balance = card.balance
+    if (!balance || typeof balance.remaining !== 'number' || !Number.isFinite(balance.remaining)) return undefined
+    const currency = balance.currency
+    const symbol = currency === 'USD' ? '$' : (currency === 'TOKEN' || currency === 'COUNT' ? '' : '¥')
+    const digits = currency === 'TOKEN' || currency === 'COUNT' ? 0 : 2
+    return `${symbol}${balance.remaining.toFixed(digits)}`
+  }
+
+  function getMetricsList(cards: AuthCardItem[], config?: QuotaConfig): HudMetric[] {
+    const list: HudMetric[] = []
 
     const hudProviders = config?.floatingHudProviders
     const selectedMetrics = config?.floatingHudMetrics
+
+    const toMetric = (card: AuthCardItem, tag: string, groupTitle: string, window: MetricWindow): HudMetric => {
+      const kind = windowQuotaKind(window)
+      const quantified = isQuantified(window)
+      const amountText = typeof window.amountText === 'string' ? window.amountText.trim() : ''
+      return {
+        key: makeHudMetricKey(card.provider, groupTitle, window.id),
+        provider: card.provider,
+        name: `${card.name} · ${groupTitle} · ${window.label}`,
+        tag,
+        kind,
+        remainingPercent: quantified ? Math.max(0, Math.min(100, Math.round(window.remainingPercent))) : undefined,
+        amountText: kind === 'balance' ? (amountText !== '' ? amountText : formatBalanceAmount(card)) : undefined,
+      }
+    }
 
     for (const card of cards) {
       if (card.status !== 'ok' && card.status !== 'warn') continue
@@ -357,20 +435,20 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
       const tag = getProviderTag(card.provider)
 
-      if (card.groups.length === 0 && card.balance?.total) {
-        const rem = card.balance.remaining !== undefined ? Math.round((card.balance.remaining / card.balance.total) * 100) : 100
+      // Balance-only card: show the amount, never derive a percentage from it.
+      if (card.groups.length === 0) {
+        if (card.balance === undefined) continue
         const key = makeHudMetricKey(card.provider, 'Balance', card.id)
         if (!isMetricSelected(card.provider, card.id, 'Balance', card.id, selectedMetrics)) {
           continue
         }
-        const sym = card.balance.currency === 'USD' ? '$' : '¥'
         list.push({
           key,
           provider: card.provider,
           name: `${card.name} · 账户余额`,
           tag,
-          remainingPercent: Math.max(0, Math.min(100, rem)),
-          balanceText: `${sym}${Number(card.balance.remaining ?? 0).toFixed(1)}`,
+          kind: 'balance',
+          amountText: formatBalanceAmount(card),
         })
         continue
       }
@@ -378,20 +456,10 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       const cardStartIndex = list.length
       for (const group of card.groups) {
         for (const window of group.windows) {
-          const key = makeHudMetricKey(card.provider, group.title, window.id)
           if (!isMetricSelected(card.provider, card.id, group.title, window.id, selectedMetrics)) {
             continue
           }
-          const isBalance = card.balance?.remaining !== undefined && (card.provider === 'deepseek' || window.barType === 'balance' as any)
-          const sym = card.balance?.currency === 'USD' ? '$' : '¥'
-          list.push({
-            key,
-            provider: card.provider,
-            name: `${card.name} · ${group.title} · ${window.label}`,
-            tag,
-            remainingPercent: Math.max(0, Math.min(100, Math.round(window.remainingPercent))),
-            balanceText: isBalance ? `${sym}${Number(card.balance!.remaining).toFixed(1)}` : undefined,
-          })
+          list.push(toMetric(card, tag, group.title, window))
         }
       }
 
@@ -400,17 +468,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       if (list.length === cardStartIndex && !hasExplicitNone && card.groups.length > 0) {
         for (const group of card.groups) {
           for (const window of group.windows) {
-            const key = makeHudMetricKey(card.provider, group.title, window.id)
-            const isBalance = card.balance?.remaining !== undefined && (card.provider === 'deepseek' || window.barType === 'balance' as any)
-            const sym = card.balance?.currency === 'USD' ? '$' : '¥'
-            list.push({
-              key,
-              provider: card.provider,
-              name: `${card.name} · ${group.title} · ${window.label}`,
-              tag,
-              remainingPercent: Math.max(0, Math.min(100, Math.round(window.remainingPercent))),
-              balanceText: isBalance ? `${sym}${Number(card.balance!.remaining).toFixed(1)}` : undefined,
-            })
+            list.push(toMetric(card, tag, group.title, window))
           }
         }
       }
@@ -470,34 +528,59 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
     if (activeIndex >= metrics.length) activeIndex = 0
     const current = metrics[activeIndex]!
-
-    const radius = 18
-    const circumference = 2 * Math.PI * radius
-    const offset = circumference - (current.remainingPercent / 100) * circumference
-    const strokeColor = getStatusColor(current.remainingPercent)
+    const quantified = isQuantifiedMetric(current)
 
     const popoverRows = metrics.map(m => {
-      const color = getStatusColor(m.remainingPercent)
+      const quantifiedRow = isQuantifiedMetric(m)
+      const color = quantifiedRow
+        ? getStatusColor(m.remainingPercent!)
+        : 'var(--dsw-alias-label-secondary, #57606a)'
       // Card/group/window text is escaped once at the controller boundary; escaping again here
       // would render visible entities (`&amp;`).
       return `
         <div class="dsh-hud-popover-row">
           <span class="dsh-hud-popover-name" title="${m.name}">${m.name}</span>
-          <span class="dsh-hud-popover-val" style="color: ${color};">${m.balanceText || `${m.remainingPercent}% 剩余`}</span>
+          <span class="dsh-hud-popover-val" style="color: ${color};">${metricValueText(m)}</span>
         </div>
       `
     }).join('')
 
-    hudEl.innerHTML = `
-      <div class="dsh-hud-circle">
+    // A percentage ring is only legitimate for `usage` windows; balance/liveness/
+    // unknown render a neutral dial instead of a fabricated full/empty ring.
+    let ringHtml = ''
+    let centerHtml = ''
+    if (quantified) {
+      const radius = 18
+      const circumference = 2 * Math.PI * radius
+      const offset = circumference - (current.remainingPercent! / 100) * circumference
+      const strokeColor = getStatusColor(current.remainingPercent!)
+      ringHtml = `
         <svg class="dsh-hud-svg" viewBox="0 0 46 46">
           <circle cx="23" cy="23" r="${radius}" stroke="var(--dsw-alias-border-l1, rgba(0,0,0,0.08))" stroke-width="3" fill="none"/>
           <circle cx="23" cy="23" r="${radius}" stroke="${strokeColor}" stroke-width="3" fill="none"
             stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" stroke-linecap="round"
             style="transition: stroke-dashoffset 0.4s ease, stroke 0.3s ease;"/>
         </svg>
+      `
+      centerHtml = `<span class="dsh-hud-percent">${Math.round(current.remainingPercent!)}%</span>`
+    } else if (current.kind === 'balance') {
+      ringHtml = `
+        <svg class="dsh-hud-svg" viewBox="0 0 46 46">
+          <circle cx="23" cy="23" r="18" stroke="var(--dsw-alias-border-l1, rgba(0,0,0,0.08))" stroke-width="3" fill="none"/>
+        </svg>
+      `
+      centerHtml = `<span class="dsh-hud-percent" style="font-size: 9.5px; font-weight: 700;">${current.amountText || '—'}</span>`
+    } else if (current.kind === 'liveness') {
+      centerHtml = `<span class="dsh-hud-percent" style="font-size: 10px;">✓</span>`
+    } else {
+      centerHtml = `<span class="dsh-hud-percent">--</span>`
+    }
+
+    hudEl.innerHTML = `
+      <div class="dsh-hud-circle">
+        ${ringHtml}
         <div class="dsh-hud-content">
-          <span class="dsh-hud-percent" style="${current.balanceText ? 'font-size: 9.5px; font-weight: 700;' : ''}">${current.balanceText || `${current.remainingPercent}%`}</span>
+          ${centerHtml}
           <span class="dsh-hud-tag">${current.tag}</span>
         </div>
         <div class="dsh-hud-popover ${popoverVClass} ${popoverHClass}">
@@ -512,6 +595,8 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   }
 
   intervalTimer = setInterval(() => {
+    // Pause the 4.5s carousel while the tab/window is hidden.
+    if (typeof document !== 'undefined' && document.hidden) return
     if (isHovered || isDragging) return // Pause carousel on hover or dragging
     const state = controller.getSnapshot()
     const metrics = getMetricsList(state.cards, state.config)
@@ -526,6 +611,8 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
   return () => {
     if (intervalTimer) clearInterval(intervalTimer)
+    unbindDragEndListeners()
+    window.removeEventListener('resize', onWindowResize)
     unsubscribe()
     hudEl.remove()
     styleEl.remove()

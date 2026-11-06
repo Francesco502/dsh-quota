@@ -6,229 +6,288 @@ export interface Route {
   handler(req: any, res: any): Promise<void> | void
 }
 
+/**
+ * Every plugin route is reachable from the browser that hosts the GUI, and the
+ * GUI's own auth cookie is not part of this API. Guard rules (defence in depth):
+ *
+ *  1. a required custom header — a cross-site page cannot attach it without a
+ *     CORS preflight, and this server answers no preflight;
+ *  2. loopback Host only — a DNS-rebinding page sends its own hostname here;
+ *  3. same-origin Origin / Sec-Fetch-Site when the browser sends them;
+ *  4. JSON content type on writes, so form/text posts cannot mutate config.
+ *
+ * `DSH_QUOTA_ALLOW_REMOTE_API=1` opts out of the loopback Host check for users
+ * who intentionally expose the GUI on a LAN address.
+ */
+const API_HEADER = 'x-dsh-quota'
+const MAX_BODY_BYTES = 256 * 1024
+
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')
+}
+
+interface GuardFailure {
+  status: number
+  message: string
+}
+
+function checkGuard(req: any): GuardFailure | undefined {
+  const header = req?.headers?.[API_HEADER]
+  if (header !== '1') return { status: 403, message: '缺少 X-DSH-Quota 请求头' }
+
+  if (process.env.DSH_QUOTA_ALLOW_REMOTE_API !== '1') {
+    const hostHeader = String(req?.headers?.host ?? '')
+    const hostname = hostHeader.startsWith('[')
+      ? hostHeader.slice(0, hostHeader.indexOf(']') + 1)
+      : hostHeader.split(':')[0]
+    if (!isLoopbackHostname(hostname)) {
+      return { status: 403, message: `非本机访问被拒绝 (Host: ${hostHeader || 'unknown'})` }
+    }
+  }
+
+  const origin = req?.headers?.origin
+  if (typeof origin === 'string' && origin.length > 0 && origin !== 'null') {
+    let originHost = ''
+    try {
+      originHost = new URL(origin).hostname
+    } catch {
+      return { status: 403, message: 'Origin 无效' }
+    }
+    if (!isLoopbackHostname(originHost)) return { status: 403, message: '跨站请求被拒绝' }
+  }
+
+  const site = req?.headers?.['sec-fetch-site']
+  if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') {
+    return { status: 403, message: `跨站请求被拒绝 (Sec-Fetch-Site: ${site})` }
+  }
+
+  return undefined
+}
+
+function sendJson(res: any, status: number, payload: unknown): void {
+  const body = JSON.stringify(payload)
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Content-Length': Buffer.byteLength(body),
+  })
+  res.end(body)
+}
+
+async function readJsonBody(req: any): Promise<any> {
+  let body = ''
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > MAX_BODY_BYTES) {
+      const error: any = new Error('请求载荷过大 (超过 256KB)')
+      error.statusCode = 413
+      throw error
+    }
+    body += chunk
+  }
+  try {
+    return JSON.parse(body || '{}')
+  } catch {
+    const error: any = new Error('请求体不是合法 JSON')
+    error.statusCode = 400
+    throw error
+  }
+}
+
+/** Downsample a trend to at most `limit` points, keeping the newest sample of each bucket. */
+function downsample<T extends { timestamp?: number; t?: number }>(points: T[], limit = 500): T[] {
+  if (points.length <= limit) return points
+  const stride = points.length / limit
+  const out: T[] = []
+  for (let i = 0; i < limit; i += 1) {
+    out.push(points[Math.min(points.length - 1, Math.floor((i + 1) * stride) - 1)]!)
+  }
+  return out
+}
+
+function clampDays(raw: string | null): number {
+  const parsed = Number.parseInt(raw ?? '7', 10)
+  if (!Number.isFinite(parsed)) return 7
+  return Math.min(30, Math.max(1, parsed))
+}
+
 export function makeQuotaRoutes(manager: QuotaManager): Route[] {
+  const guarded = (
+    handler: (req: any, res: any) => Promise<void> | void,
+  ): ((req: any, res: any) => Promise<void>) => {
+    return async (req: any, res: any) => {
+      const failure = checkGuard(req)
+      if (failure !== undefined) {
+        sendJson(res, failure.status, { ok: false, error: failure.message })
+        return
+      }
+      if (req.method === 'POST' && !/^application\/json\b/i.test(String(req.headers?.['content-type'] ?? ''))) {
+        sendJson(res, 415, { ok: false, error: 'POST 必须使用 application/json' })
+        return
+      }
+      try {
+        await handler(req, res)
+      } catch (err: any) {
+        sendJson(res, err?.statusCode ?? 500, { ok: false, error: err?.message ?? String(err) })
+      }
+    }
+  }
+
+  const withAbort = (req: any): AbortSignal => {
+    const controller = new AbortController()
+    if (typeof req?.on === 'function') {
+      req.on('close', () => controller.abort())
+      req.on('aborted', () => controller.abort())
+    }
+    return controller.signal
+  }
+
   return [
     {
       kind: 'exact',
       path: '/api/dsh-quota/status',
-      async handler(req: any, res: any) {
-        try {
-          const url = new URL(req.url, 'http://127.0.0.1')
-          const force = url.searchParams.get('force') === 'true'
-          const provider = url.searchParams.get('provider')
-          if (provider) {
-            const card = await manager.refreshSingleProvider(provider)
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ ok: true, card }))
+      handler: guarded(async (req: any, res: any) => {
+        const url = new URL(req.url, 'http://127.0.0.1')
+        const force = url.searchParams.get('force') === 'true'
+        const provider = url.searchParams.get('provider')
+        const signal = withAbort(req)
+
+        if (provider) {
+          const card = await manager.refreshSingleProvider(provider, signal)
+          if (card === undefined) {
+            sendJson(res, 404, { ok: false, error: `未知或未启用的服务商: ${provider}` })
             return
           }
-          const result = await manager.getQuotaCards(force)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result))
-        } catch (err: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message }))
+          sendJson(res, 200, { ok: true, card })
+          return
         }
-      },
+
+        const result = await manager.getQuotaCards(force, undefined, signal)
+        sendJson(res, 200, result)
+      }),
     },
     {
       kind: 'exact',
       path: '/api/dsh-quota/test-connection',
-      async handler(req: any, res: any) {
+      handler: guarded(async (req: any, res: any) => {
         if (req.method !== 'POST') {
-          res.writeHead(405, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Method not allowed' }))
+          sendJson(res, 405, { ok: false, error: '仅支持 POST' })
           return
         }
-        try {
-          let body = ''
-          let size = 0
-          for await (const chunk of req) {
-            size += chunk.length
-            if (size > 256 * 1024) {
-              res.writeHead(413, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ ok: false, message: '请求载荷过大 (超过 256KB)' }))
-              return
-            }
-            body += chunk
-          }
-          const payload = JSON.parse(body || '{}')
-          const { provider, accountConfig } = payload
-          if (!provider) {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ ok: false, message: '缺少 provider 参数' }))
-            return
-          }
-          const testRes = await manager.testConnection(provider, accountConfig)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(testRes))
-        } catch (err: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: false, message: err.message }))
+        const payload = await readJsonBody(req)
+        const provider = typeof payload?.provider === 'string' ? payload.provider : ''
+        if (!provider) {
+          sendJson(res, 400, { ok: false, message: '缺少 provider 参数' })
+          return
         }
-      },
+        const testResult = await manager.testConnection(provider, payload?.accountConfig, withAbort(req))
+        sendJson(res, 200, testResult)
+      }),
     },
     {
       kind: 'exact',
       path: '/api/dsh-quota/test-all',
-      async handler(req: any, res: any) {
+      handler: guarded(async (req: any, res: any) => {
         if (req.method !== 'POST') {
-          res.writeHead(405, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Method not allowed' }))
+          sendJson(res, 405, { ok: false, error: '仅支持 POST' })
           return
         }
-        try {
-          const results = await manager.testAllConnections()
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, results }))
-        } catch (err: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: false, error: err.message }))
-        }
-      },
+        const results = await manager.testAllConnections(withAbort(req))
+        sendJson(res, 200, { ok: true, results })
+      }),
     },
     {
       kind: 'exact',
       path: '/api/dsh-quota/history',
-      async handler(req: any, res: any) {
-        try {
-          const url = new URL(req.url, 'http://127.0.0.1')
-          const instanceId = url.searchParams.get('instanceId')
-          const days = parseInt(url.searchParams.get('days') || '7', 10)
-          if (!instanceId) {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Missing instanceId' }))
-            return
-          }
-          const points = manager.historyManager.getTrendPoints(instanceId, days)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, points }))
-        } catch (err: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message }))
+      handler: guarded(async (req: any, res: any) => {
+        const url = new URL(req.url, 'http://127.0.0.1')
+        const instanceId = url.searchParams.get('instanceId')
+        if (!instanceId) {
+          sendJson(res, 400, { ok: false, error: '缺少 instanceId 参数' })
+          return
         }
-      },
+        if (instanceId.length > 200) {
+          sendJson(res, 400, { ok: false, error: 'instanceId 过长' })
+          return
+        }
+        const points = manager.historyManager.getTrendPoints(instanceId, clampDays(url.searchParams.get('days')))
+        sendJson(res, 200, { ok: true, points: downsample(points) })
+      }),
     },
     {
       kind: 'exact',
       path: '/api/dsh-quota/config',
-      async handler(req: any, res: any) {
+      handler: guarded(async (req: any, res: any) => {
         if (req.method === 'GET') {
-          try {
-            const cfg = manager.getSafeConfig()
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify(cfg))
-          } catch (err: any) {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: err.message }))
-          }
+          sendJson(res, 200, manager.getSafeConfig())
           return
         }
         if (req.method !== 'POST') {
-          res.writeHead(405, { Allow: 'GET, POST', 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'method not allowed' }))
+          sendJson(res, 405, { ok: false, error: '仅支持 GET/POST' })
           return
         }
-        try {
-          let body = ''
-          let size = 0
-          for await (const chunk of req) {
-            size += chunk.length
-            if (size > 256 * 1024) {
-              res.writeHead(413, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ error: '配置请求过大 (超过 256KB)' }))
-              return
-            }
-            body += chunk
-          }
-          const parsed = JSON.parse(body || '{}')
-          manager.saveConfig(parsed)
-          void manager.getQuotaCards(true)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true }))
-        } catch (err: any) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message }))
+        const parsed = await readJsonBody(req)
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          sendJson(res, 400, { ok: false, error: '配置必须是 JSON 对象' })
+          return
         }
-      },
+        manager.saveConfig(parsed)
+        // Refresh in the background; a failure must never become an unhandled rejection.
+        void manager.getQuotaCards(true).catch((err: any) => {
+          console.warn('[dsh-quota] background refresh after config save failed:', err?.message ?? err)
+        })
+        sendJson(res, 200, { ok: true })
+      }),
     },
     {
       kind: 'exact',
       path: '/api/dsh-quota/auth/codex/start',
-      async handler(req: any, res: any) {
-        try {
-          const cfg = manager.getConfig()
-          const { authUrl } = await manager.oauthManager.startCodexLogin((tokens) => {
-            manager.saveCodexLogin(tokens)
-            const current = manager.getConfig()
-            const { oauth: _legacyOauth, ...codex } = current.codex ?? {}
-            manager.saveConfig({
-              ...current,
-              codex: {
-                ...codex,
-                enabled: true,
-                autoDetectLocal: true,
-              },
-            })
-            void manager.getQuotaCards(true)
-          }, cfg.httpProxy, cfg.proxyMode)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, authUrl }))
-        } catch (err: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message }))
-        }
-      },
+      handler: guarded(async (req: any, res: any) => {
+        const cfg = manager.getConfig()
+        const { authUrl } = await manager.oauthManager.startCodexLogin((tokens) => {
+          manager.saveCodexLogin(tokens)
+          const current = manager.getConfig()
+          const { oauth: _legacyOauth, ...codex } = current.codex ?? {}
+          manager.saveConfig({
+            ...current,
+            codex: { ...codex, enabled: true, autoDetectLocal: true },
+          })
+          void manager.getQuotaCards(true).catch(() => {})
+        }, cfg.httpProxy, cfg.proxyMode)
+        sendJson(res, 200, { ok: true, authUrl })
+      }),
     },
     {
       kind: 'exact',
       path: '/api/dsh-quota/auth/antigravity/start',
-      async handler(req: any, res: any) {
-        try {
-          const cfg = manager.getConfig()
-          const { authUrl } = await manager.oauthManager.startAntigravityLogin((tokens) => {
-            const current = manager.getConfig()
-            manager.saveConfig({
-              ...current,
-              antigravity: {
-                enabled: true,
-                autoDetectLocal: true,
-                oauth: tokens,
-              },
-            })
-            void manager.getQuotaCards(true)
-          }, cfg.httpProxy, cfg.proxyMode)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, authUrl }))
-        } catch (err: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message }))
-        }
-      },
+      handler: guarded(async (req: any, res: any) => {
+        const cfg = manager.getConfig()
+        const { authUrl } = await manager.oauthManager.startAntigravityLogin((tokens) => {
+          const current = manager.getConfig()
+          manager.saveConfig({
+            ...current,
+            antigravity: { enabled: true, autoDetectLocal: true, oauth: tokens },
+          })
+          void manager.getQuotaCards(true).catch(() => {})
+        }, cfg.httpProxy, cfg.proxyMode)
+        sendJson(res, 200, { ok: true, authUrl })
+      }),
     },
     {
       kind: 'exact',
       path: '/api/dsh-quota/auth/cursor/connect',
-      async handler(req: any, res: any) {
-        try {
-          const current = manager.getConfig()
-          manager.saveConfig({
-            ...current,
-            cursor: {
-              ...current.cursor,
-              enabled: true,
-              autoDetectLocal: true,
-            },
-          })
-          const q = await manager.getQuotaCards(true)
-          const cursorCard = q.cards.find(c => c.provider === 'cursor')
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, card: cursorCard }))
-        } catch (err: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message }))
-        }
-      },
+      handler: guarded(async (req: any, res: any) => {
+        const current = manager.getConfig()
+        manager.saveConfig({
+          ...current,
+          cursor: { ...current.cursor, enabled: true, autoDetectLocal: true },
+        })
+        const q = await manager.getQuotaCards(true)
+        const cursorCard = q.cards.find((c) => c.provider === 'cursor')
+        sendJson(res, 200, { ok: true, card: cursorCard })
+      }),
     },
   ]
 }

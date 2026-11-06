@@ -70,46 +70,72 @@ function placeEntry(root: HTMLElement, entry: HTMLButtonElement, options: Sideba
 }
 
 export function mountSidebarEntry(options: SidebarEntryOptions): () => void {
-  if (typeof document !== 'undefined' && document.querySelector(options.rowSelector) !== null) {
-    return () => {}
+  if (typeof document === 'undefined') return () => {}
+
+  // Idempotent re-apply: a leftover entry from a previous instance (HMR, plugin
+  // re-enable) kept its DOM node but lost its click handler, i.e. a dead button.
+  // Remove every leftover before mounting the live one.
+  for (const stale of Array.from(document.querySelectorAll<HTMLElement>(options.rowSelector))) {
+    stale.remove()
   }
+
   const entry = createEntry(options)
   let root: HTMLElement | undefined
   let placed = false
+  let frameId: number | null = null
+
+  const requestFrame = (callback: () => void): number => {
+    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(() => callback())
+    return setTimeout(callback, 16) as unknown as number
+  }
+
+  const cancelFrame = (id: number): void => {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id)
+    else clearTimeout(id as unknown as ReturnType<typeof setTimeout>)
+  }
+
+  const observer = new MutationObserver(() => {
+    if (frameId !== null) return
+    frameId = requestFrame(() => {
+      frameId = null
+      tryPlace()
+    })
+  })
+
+  // While the root is unknown the whole shell is watched; once found, observation
+  // is narrowed to the sidebar root (plus its parent for column swaps) so chat
+  // streaming mutations never reach this plugin.
+  const observeNarrow = (target: HTMLElement): void => {
+    observer.disconnect()
+    observer.observe(target, { childList: true, subtree: true })
+    if (target.parentElement !== null) observer.observe(target.parentElement, { childList: true })
+    // Cheap shell-level catch: direct body children only, in case the whole
+    // sidebar column is replaced without mutating the observed parent chain.
+    observer.observe(document.body, { childList: true })
+  }
+
+  const observeBroad = (): void => {
+    observer.disconnect()
+    observer.observe(document.body, { childList: true, subtree: true })
+  }
 
   const tryPlace = (): void => {
     if (root !== undefined && !root.isConnected) {
-      rootObserver.disconnect()
       root = undefined
       placed = false
     }
     if (placed) {
       if (document.body.contains(entry)) return
-      rootObserver.disconnect()
-      root = undefined
       placed = false
     }
     root ??= sidebarRoot()
-    if (root === undefined) return
-    placed = placeEntry(root, entry, options)
-    if (placed) {
-      rootObserver.observe(root, { childList: true, subtree: true })
-    }
-  }
-
-  const waitObserver = new MutationObserver(() => { tryPlace() })
-  waitObserver.observe(document.body, { childList: true, subtree: true })
-
-  const rootObserver = new MutationObserver(() => {
-    if (root === undefined || !root.isConnected) {
-      placed = false
-      tryPlace()
+    if (root === undefined) {
+      observeBroad()
       return
     }
-    if (!root.contains(entry)) {
-      placed = placeEntry(root, entry, options)
-    }
-  })
+    placed = placeEntry(root, entry, options)
+    if (placed) observeNarrow(root)
+  }
 
   const unsubscribeActive = options.active === undefined ? undefined : (() => {
     const syncActive = (): void => {
@@ -122,10 +148,14 @@ export function mountSidebarEntry(options: SidebarEntryOptions): () => void {
   })()
 
   tryPlace()
+  if (root === undefined) observeBroad()
 
   return () => {
-    waitObserver.disconnect()
-    rootObserver.disconnect()
+    observer.disconnect()
+    if (frameId !== null) {
+      cancelFrame(frameId)
+      frameId = null
+    }
     unsubscribeActive?.()
     entry.remove()
   }

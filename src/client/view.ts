@@ -1,6 +1,6 @@
 import type { QuotaController } from './controller.ts'
 import type { AuthCardItem, QuotaConfig, MetricWindow, ProviderCategory, QuotaSparklinePoint, AccountConfigItem, CustomCompatibleEndpoint } from './api.ts'
-import { makeHudMetricKey } from './api.ts'
+import { makeHudMetricKey, isQuantified, windowQuotaKind } from './api.ts'
 
 interface ProviderMeta {
   id: string
@@ -194,43 +194,73 @@ function renderHelp(text: string): string {
   `
 }
 
-function formatWindowSubtitle(win: MetricWindow): string {
-  const rem = Math.max(0, Math.min(100, Math.round(win.remainingPercent)))
-  const used = Math.max(0, Math.min(100, Math.round(win.usedPercent ?? (100 - rem))))
+/**
+ * Subtitle rule shared by cards and the HUD. Never fabricates a ratio: only a
+ * `usage` window with both percentages gets a percentage sentence, `balance`
+ * shows the truthful amount, `liveness` says connectivity only and `unknown`
+ * stays unknown.
+ */
+export function formatWindowSubtitle(win: MetricWindow, now: number = Date.now()): string {
+  const kind = windowQuotaKind(win)
+  const subtitle = typeof win.subtitle === 'string' && win.subtitle.trim() !== '' ? win.subtitle : ''
 
-  if (rem >= 100 || used <= 0) return '已用 0% · 额度充足'
+  if (kind === 'usage' && isQuantified(win)) {
+    const rem = Math.max(0, Math.min(100, Math.round(win.remainingPercent)))
+    const used = Math.max(0, Math.min(100, Math.round(win.usedPercent)))
 
-  if (win.resetAt) {
-    const resetDate = new Date(win.resetAt)
-    if (!isNaN(resetDate.getTime())) {
-      const diffMs = resetDate.getTime() - Date.now()
-      if (diffMs > 0) {
-        const totalMinutes = Math.ceil(diffMs / (60 * 1000))
-        const days = Math.floor(totalMinutes / (24 * 60))
-        const hours = Math.floor((totalMinutes % (24 * 60)) / 60)
-        const minutes = totalMinutes % 60
-        const m = resetDate.getMonth() + 1
-        const d = resetDate.getDate()
-        const hh = String(resetDate.getHours()).padStart(2, '0')
-        const mm = String(resetDate.getMinutes()).padStart(2, '0')
-        const dateStr = `${m}/${d}`
-        const timeStr = `${hh}:${mm}`
-        const fullTimeStr = days > 0 ? `${dateStr} ${timeStr}` : timeStr
+    if (rem >= 100 || used <= 0) return '已用 0% · 额度充足'
 
-        let countdown = ''
-        if (days > 0) countdown = `${days} 天${hours > 0 ? ` ${hours} 小时` : ''}后`
-        else if (hours > 0) countdown = `${hours} 小时${minutes > 0 ? ` ${minutes} 分钟` : ''}后`
-        else countdown = `${minutes} 分钟后`
+    if (win.resetAt) {
+      const resetDate = new Date(win.resetAt)
+      if (!isNaN(resetDate.getTime())) {
+        const diffMs = resetDate.getTime() - now
+        if (diffMs > 0) {
+          const totalMinutes = Math.ceil(diffMs / (60 * 1000))
+          const days = Math.floor(totalMinutes / (24 * 60))
+          const hours = Math.floor((totalMinutes % (24 * 60)) / 60)
+          const minutes = totalMinutes % 60
+          const m = resetDate.getMonth() + 1
+          const d = resetDate.getDate()
+          const hh = String(resetDate.getHours()).padStart(2, '0')
+          const mm = String(resetDate.getMinutes()).padStart(2, '0')
+          const dateStr = `${m}/${d}`
+          const timeStr = `${hh}:${mm}`
+          const fullTimeStr = days > 0 ? `${dateStr} ${timeStr}` : timeStr
 
-        return `已用 ${used}% · 预计 ${countdown}重置 (${fullTimeStr})`
-      } else {
+          let countdown = ''
+          if (days > 0) countdown = `${days} 天${hours > 0 ? ` ${hours} 小时` : ''}后`
+          else if (hours > 0) countdown = `${hours} 小时${minutes > 0 ? ` ${minutes} 分钟` : ''}后`
+          else countdown = `${minutes} 分钟后`
+
+          return `已用 ${used}% · 预计 ${countdown}重置 (${fullTimeStr})`
+        }
         return `已用 ${used}% · 即将重置`
       }
     }
+
+    return subtitle || `已用 ${used}%`
   }
 
-  if (win.subtitle && win.subtitle.trim()) return win.subtitle
-  return `已用 ${used}%`
+  if (kind === 'balance') {
+    if (subtitle) return subtitle
+    const amountText = typeof win.amountText === 'string' ? win.amountText.trim() : ''
+    return amountText !== '' ? `余额 ${amountText}` : '—'
+  }
+
+  if (kind === 'liveness') return subtitle || '已连接 · 未提供额度接口'
+
+  // `unknown`, and malformed `usage` windows without two finite percentages.
+  return subtitle || '额度状态未知'
+}
+
+/** `hh:mm` clock for the "last updated" header, or '' when unknown. */
+export function formatClockTime(timestamp: number): string {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) return ''
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return ''
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
 }
 
 function renderCircleProgress(remainingPercent: number): string {
@@ -329,7 +359,7 @@ function showConfirmModal(opts: {
   content: string
   confirmText?: string
   onConfirm: () => void
-}): void {
+}, onOpen?: (overlay: HTMLElement) => void): void {
   if (typeof document === 'undefined') return
   const overlay = document.createElement('div')
   overlay.className = 'dsh-quota-modal-overlay'
@@ -343,6 +373,7 @@ function showConfirmModal(opts: {
       </div>
     </div>
   `
+  onOpen?.(overlay)
   document.body.appendChild(overlay)
   const close = () => overlay.remove()
   overlay.addEventListener('click', (e) => {
@@ -602,6 +633,12 @@ function getAvailableHudMetricsForTarget(target: DrawerTarget, cards: AuthCardIt
 }
 
 export function renderQuotaApp(container: HTMLElement, controller: QuotaController): () => void {
+  // Both mount paths (legacy conversation overlay and the official slot host)
+  // need the view marker: the shared stylesheet and the scroll container rules
+  // key off it.
+  container.setAttribute('data-dsh-quota-view', '')
+  container.setAttribute('data-dsh-plugin', 'quota')
+
   const styleEl = document.createElement('style')
   styleEl.textContent = `
     [data-pane='conversation'], [class*='centerCol'] {
@@ -825,6 +862,59 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       font-weight: 700;
       min-width: 42px;
       text-align: right;
+    }
+    .row-percent-number.is-unknown {
+      color: var(--dsw-alias-label-tertiary, #888);
+    }
+    .row-amount-number {
+      font-size: 15.5px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      font-variant-numeric: tabular-nums;
+    }
+    .row-metric-caption {
+      font-size: 11px;
+      color: var(--dsw-alias-label-secondary, #57606a);
+      font-weight: 500;
+    }
+    .quota-kind-badge {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--dsw-alias-label-secondary, #57606a);
+      background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.05));
+      border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
+      border-radius: 999px;
+      padding: 2px 8px;
+      white-space: nowrap;
+    }
+    .quota-updated-tag {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--dsw-alias-label-tertiary, #888);
+      margin-left: 8px;
+    }
+    .quota-error-banner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      border-radius: 8px;
+      border: 1px solid color-mix(in srgb, #B04A46 35%, transparent);
+      background: color-mix(in srgb, #B04A46 8%, transparent);
+      color: var(--dsw-alias-label-error, #B04A46);
+      font-size: 12.5px;
+    }
+    .quota-error-banner .quota-error-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .quota-error-banner .quota-error-time {
+      flex: none;
+      opacity: 0.8;
+      font-size: 11.5px;
     }
     .group-header-title {
       font-size: 12px;
@@ -1413,6 +1503,23 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
   let activeDrawerTarget: DrawerTarget | null = null
   let isDrawerOpen = false
   let isAddServiceModalOpen = false
+  // True while the user has unsaved edits in the panel: background polling must
+  // not rebuild the content area and wipe them.
+  let settingsDirty = false
+  // Nodes appended to document.body by this view (confirm overlays, toast).
+  const externalNodes = new Set<HTMLElement>()
+
+  function isEditingInsideContainer(): boolean {
+    if (typeof document === 'undefined') return false
+    const active = document.activeElement as HTMLElement | null
+    if (active === null || !container.contains(active)) return false
+    const tag = active.tagName
+    return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
+  }
+
+  function confirmModal(opts: Parameters<typeof showConfirmModal>[0]): void {
+    showConfirmModal(opts, overlay => externalNodes.add(overlay))
+  }
 
   function closeDrawer() {
     isDrawerOpen = false
@@ -1672,6 +1779,16 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       return
     }
 
+    // Polling / focus refresh must not rebuild the content area while the user is
+    // editing a field or has unsaved changes: the rebuild resets scroll and inputs.
+    if (settingsDirty || isEditingInsideContainer()) {
+      return
+    }
+
+    // innerHTML replaces the whole subtree, so remember the scroll offset and
+    // restore it after the rebuild (the container itself is the scroll box).
+    const previousScrollTop = container.scrollTop
+
     const cfg = state.config || {}
     let contentHtml = ''
 
@@ -1755,25 +1872,18 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                 const isCollapsed = state.collapsedGroups.has(groupKey)
 
                 const rowsHtml = group.windows.map(win => {
-                  const rem = Math.max(0, Math.min(100, Math.round(win.remainingPercent)))
+                  const kind = windowQuotaKind(win)
+                  const quantified = isQuantified(win)
                   const subText = formatWindowSubtitle(win)
 
-                  // Check if this is a balance-only metric (no percentage suitable)
-                  const isBalance = card.balance?.remaining !== undefined && (
-                    card.provider === 'deepseek' ||
-                    (win as any).barType === 'balance' ||
-                    win.id.includes('balance') ||
-                    win.label.includes('余额')
-                  )
-
-                  if (isBalance && card.balance) {
-                    const sym = card.balance.currency === 'USD' ? '$' : '¥'
-                    const amount = Number(card.balance.remaining).toFixed(2)
-                    // Colour a balance by money left, never by a derived percentage.
-                    const balanceColor = Number(card.balance.remaining) <= 5
-                      ? '#B04A46'
-                      : (Number(card.balance.remaining) <= 20 ? '#BA8137' : '#3F7A63')
-
+                  // Balance-only windows: show the truthful amount, never a ratio.
+                  if (kind === 'balance') {
+                    const amountText = typeof win.amountText === 'string' && win.amountText.trim() !== ''
+                      ? win.amountText.trim()
+                      : '—'
+                    const amountColor = amountText === '—'
+                      ? 'var(--dsw-alias-label-tertiary, #888)'
+                      : 'var(--dsw-alias-label-primary, #1f2328)'
                     return `
                       <div class="card-row">
                         <div class="row-left-content">
@@ -1781,21 +1891,46 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                           <span class="row-sub-label" title="${subText}">${subText}</span>
                         </div>
                         <div class="row-right-metric">
-                          ${renderSparklineSvg(card.sparkline, rem, 80, 24)}
                           <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1px;">
-                            <div style="display: inline-flex; align-items: baseline; color: ${balanceColor}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;">
-                              <span style="font-size: 11.5px; font-weight: 600; margin-right: 1.5px; opacity: 0.85;">${sym}</span>
-                              <span style="font-size: 15.5px; font-weight: 700; letter-spacing: -0.3px;">${amount}</span>
-                            </div>
-                            <span style="font-size: 11px; color: var(--dsw-alias-label-secondary, #57606a); font-weight: 500;">
-                              余额
-                            </span>
+                            <span class="row-amount-number" style="color: ${amountColor};">${amountText}</span>
+                            <span class="row-metric-caption">余额</span>
                           </div>
                         </div>
                       </div>
                     `
                   }
 
+                  // Connectivity-only window: no ring, no percentage, no "额度充足".
+                  if (kind === 'liveness') {
+                    return `
+                      <div class="card-row">
+                        <div class="row-left-content">
+                          <span class="row-main-label" title="${win.label}">${win.label}</span>
+                          <span class="row-sub-label" title="${subText}">${subText}</span>
+                        </div>
+                        <div class="row-right-metric">
+                          <span class="quota-kind-badge">仅连通性</span>
+                        </div>
+                      </div>
+                    `
+                  }
+
+                  // `unknown`, or a malformed `usage` window without two finite percentages.
+                  if (!quantified) {
+                    return `
+                      <div class="card-row">
+                        <div class="row-left-content">
+                          <span class="row-main-label" title="${win.label}">${win.label}</span>
+                          <span class="row-sub-label" title="${subText}">${subText}</span>
+                        </div>
+                        <div class="row-right-metric">
+                          <span class="row-percent-number is-unknown">—</span>
+                        </div>
+                      </div>
+                    `
+                  }
+
+                  const rem = Math.max(0, Math.min(100, Math.round(win.remainingPercent)))
                   const statusColor = getQuotaStatusColor(rem)
                   return `
                     <div class="card-row">
@@ -1804,7 +1939,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                         <span class="row-sub-label" title="${subText}">${subText}</span>
                       </div>
                       <div class="row-right-metric">
-                        ${renderSparklineSvg(card.sparkline, rem, 80, 24)}
+                        ${Array.isArray(card.sparkline) && card.sparkline.length >= 2 ? renderSparklineSvg(card.sparkline, rem, 80, 24) : ''}
                         <span class="row-percent-number" style="color: ${statusColor};">${rem}%</span>
                         ${renderCircleProgress(rem)}
                       </div>
@@ -1826,16 +1961,23 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
               }).join('')
             }
 
+            // Burn rate is derived from percentages, so it only makes sense when at
+            // least one window actually carries a real ratio.
+            const hasQuantifiedWindow = card.groups.some(g => g.windows.some(w => isQuantified(w)))
             let rateBadge = ''
-            if (card.burnRatePerHour && card.burnRatePerHour > 0) {
+            if (hasQuantifiedWindow && card.burnRatePerHour && card.burnRatePerHour > 0) {
               rateBadge = `<span style="font-size: 11.5px; color: var(--dsw-alias-label-tertiary);">消耗: ${card.burnRatePerHour}%/h${card.estimatedHoursLeft ? ` · 余约 ${card.estimatedHoursLeft}h` : ''}</span>`
             }
+            const staleBadge = card.stale || card.sourceProvenance?.partial
+              ? '<span class="quota-kind-badge" title="数据可能已过期或仅部分窗口可用">缓存</span>'
+              : ''
 
             return `
               <div class="quota-section" data-card-id="${card.id}">
                 <div class="auth-title-row">
                   <div class="auth-section-title">
                     <span>${card.name}</span>
+                    ${staleBadge}
                   </div>
                   <div style="display: flex; gap: 8px; align-items: center;">
                     ${rateBadge}
@@ -2202,12 +2344,26 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       `
     }
 
+    const lastUpdatedClock = formatClockTime(state.lastUpdated)
+    const lastUpdatedLabel = lastUpdatedClock !== '' ? `最后更新 ${lastUpdatedClock}` : '尚未更新'
+    const errorBannerHtml = state.error
+      ? `
+        <div class="quota-error-banner" role="alert">
+          <span style="flex: none; font-weight: 600;">⚠ 刷新失败</span>
+          <span class="quota-error-text" title="${esc(state.error)}">${esc(state.error)}</span>
+          ${lastUpdatedClock !== '' ? `<span class="quota-error-time">显示 ${lastUpdatedClock} 的缓存数据</span>` : ''}
+          <button type="button" class="quota-btn secondary btn-retry-refresh" style="flex: none; padding: 3px 10px; font-size: 11.5px;">重试</button>
+        </div>
+      `
+      : ''
+
     container.innerHTML = `
       <div class="quota-container">
         <div class="quota-header">
           <div class="quota-title">
             <span>AI 额度监控</span>
-            <span class="quota-version-tag">v0.4.0</span>
+            <span class="quota-version-tag">v0.4.1</span>
+            <span class="quota-updated-tag" title="数据最后更新时间">${lastUpdatedLabel}</span>
             ${state.loading ? '<span style="font-size: 12px; font-weight: normal; color: var(--dsw-alias-brand-primary, #0969da); margin-left: 8px;">正在刷新...</span>' : ''}
           </div>
           <div style="display: flex; gap: 10px; align-items: center;">
@@ -2218,6 +2374,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
             <button id="btn-refresh" class="quota-btn secondary">↻ 全部刷新</button>
           </div>
         </div>
+        ${errorBannerHtml}
         ${contentHtml}
       </div>
 
@@ -2225,10 +2382,14 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       ${detailsModalHtml}
     `
 
+    // Restore the scroll offset the user had before this (polling-driven) rebuild.
+    if (previousScrollTop > 0) container.scrollTop = previousScrollTop
+
     // Navigation events
     container.querySelector('#tab-overview')?.addEventListener('click', () => controller.setTab('overview'))
     container.querySelector('#tab-settings')?.addEventListener('click', () => controller.setTab('settings'))
     container.querySelector('#btn-refresh')?.addEventListener('click', () => controller.refresh(true))
+    container.querySelector('.btn-retry-refresh')?.addEventListener('click', () => void controller.refresh(true))
     container.querySelector('.btn-goto-settings')?.addEventListener('click', () => controller.setTab('settings'))
 
     // Overview: Category chips & Accordions
@@ -2343,7 +2504,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           const idx = Number(btn.getAttribute('data-idx'))
           const ep = currentCfg.custom_compatible?.[idx]
           if (!ep) return
-          showConfirmModal({
+          confirmModal({
             title: '确认删除中转站',
             content: `确定要删除「${ep.name}」吗？删除后将从列表中彻底移除。`,
             confirmText: '确认删除',
@@ -2370,7 +2531,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         } else if (id) {
           const meta = PROVIDER_METAS[id]
           const displayName = getServiceDisplayName(id, currentCfg, meta?.name || id)
-          showConfirmModal({
+          confirmModal({
             title: '确认清除凭据',
             content: `确定要清除「${displayName}」的凭据吗？删除后该服务将从列表中移除。`,
             confirmText: '确认清除',
@@ -2628,7 +2789,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           if (typeof parsed !== 'object' || parsed === null) {
             throw new Error('配置文件非有效 JSON 对象')
           }
-          showConfirmModal({
+          confirmModal({
             title: '导入配置确认',
             content: '确认导入该配置文件吗？导入后现有配置将被覆盖并即刻生效。',
             confirmText: '立即导入',
@@ -2827,7 +2988,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
 
         if (activeDrawerTarget.kind === 'custom') {
           const targetEp = activeDrawerTarget.endpoint
-          showConfirmModal({
+          confirmModal({
             title: '确认删除中转站',
             content: `确定要删除中转端点「${targetEp.name}」吗？删除后将从列表中彻底移除。`,
             confirmText: '确认删除',
@@ -2858,7 +3019,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         if (activeDrawerTarget.kind === 'provider') {
           const prov = activeDrawerTarget.id
           const meta = PROVIDER_METAS[prov]
-          showConfirmModal({
+          confirmModal({
             title: '确认删除凭据',
             content: `确定要删除「${meta?.name || prov}」的登录凭据吗？删除后该服务将从列表中移除。`,
             confirmText: '确认删除',
@@ -2988,6 +3149,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
   // Keyboard shortcuts
   function handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
+      settingsDirty = false
       if (isDrawerOpen) closeDrawer()
       else if (isAddServiceModalOpen) {
         isAddServiceModalOpen = false
@@ -2997,12 +3159,52 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
   }
   document.addEventListener('keydown', handleKeyDown)
 
+  // Track unsaved edits so background polling skips the content rebuild.
+  function markDirty(event: Event): void {
+    const target = event.target as HTMLElement | null
+    if (target === null) return
+    if (target.tagName === 'INPUT') {
+      const type = (target as HTMLInputElement).type
+      if (type === 'checkbox' || type === 'radio' || type === 'file' || type === 'button' || type === 'submit') return
+    }
+    if (target.tagName === 'BUTTON') return
+    settingsDirty = true
+  }
+
+  function clearDirtyOnAction(event: Event): void {
+    const target = event.target as HTMLElement | null
+    if (target === null) return
+    if (target.closest('.quota-tab-btn, .category-chip, [data-group-toggle], .btn-card-refresh, #btn-refresh, .quota-segmented-btn, .btn-add-service, .btn-drawer-save, .btn-drawer-cancel, .btn-drawer-close, .btn-drawer-delete, .btn-close-add-modal, .btn-goto-settings, .btn-retry-refresh, button[type="submit"]') !== null
+      || target.matches('#dsh-details-modal-overlay, #dsh-add-service-overlay')) {
+      settingsDirty = false
+    }
+  }
+
+  const clearDirtyOnSubmit = (): void => { settingsDirty = false }
+  container.addEventListener('input', markDirty, true)
+  container.addEventListener('change', markDirty, true)
+  container.addEventListener('click', clearDirtyOnAction, true)
+  container.addEventListener('submit', clearDirtyOnSubmit, true)
+
   const unsubscribe = controller.subscribe(update)
   update()
 
   return () => {
     unsubscribe()
     document.removeEventListener('keydown', handleKeyDown)
+    container.removeEventListener('input', markDirty, true)
+    container.removeEventListener('change', markDirty, true)
+    container.removeEventListener('click', clearDirtyOnAction, true)
+    container.removeEventListener('submit', clearDirtyOnSubmit, true)
+    // Overlays/confirm boxes are appended to document.body, so the container
+    // teardown cannot remove them; drop them explicitly (HMR / plugin disable).
+    for (const node of externalNodes) node.remove()
+    externalNodes.clear()
+    const toast = document.getElementById('dsh-quota-toast')
+    if (toast !== null) {
+      clearTimeout((toast as any)._timer)
+      toast.remove()
+    }
     styleEl.remove()
   }
 }

@@ -1,19 +1,20 @@
 /**
  * Host loader entry for dsh-quota plugin.
  * @package dsh-quota
- * @version 0.4.0
+ * @version 0.4.1
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { QuotaManager } from './core/manager.ts'
+import { PLUGIN_VERSION } from './core/types.ts'
 import { makeQuotaRoutes } from './routes.ts'
 
-export const VERSION = '0.4.0'
+export const VERSION = PLUGIN_VERSION
 export const inject = ['systemPrompt', 'webServer']
 
-const GUIDANCE = '本机已安装 dsh-quota 插件（DSH AI 额度与用量监控 v0.4.0）：侧边栏「额度监控」入口。能力：集中监控并展示 DeepSeek、Cursor、Codex、Google Antigravity、GitHub Copilot、OpenAI Billing、Claude、Kimi、智谱 GLM、MiniMax、通义千问、火山方舟、硅基流动 (SiliconFlow)、OpenRouter、OpenCode-Go 及 OneAPI 中转服务的实时剩余额度、用量及到期重置周期；支持 Gemini 4 Argon 独立周额度、7 天时序趋势 Sparkline、消耗速率计算、一键全部测活与多账号中转管理。在长程编码任务启动前或用户询问额度/模型选择时，可调用 get_quota_status 自动获取各模型实时余量与智能路由推荐。'
+const GUIDANCE = `本机已安装 dsh-quota 插件（DSH AI 额度与用量监控 v${PLUGIN_VERSION}）：侧边栏「额度监控」入口。能力：集中监控并展示 DeepSeek、Cursor、Codex、Google Antigravity、GitHub Copilot、OpenAI Billing、Claude、Kimi、智谱 GLM、MiniMax、通义千问、火山方舟、硅基流动 (SiliconFlow)、OpenRouter、OpenCode-Go 及 OneAPI 中转服务的实时剩余额度、用量及到期重置周期；支持 Gemini 4 Argon 独立周额度、7 天时序趋势 Sparkline、消耗速率计算、一键全部测活与多账号中转管理。在长程编码任务启动前或用户询问额度/模型选择时，可调用 get_quota_status 自动获取各模型实时余量与智能路由推荐。`
 
 export function apply(ctx: Context): void {
   const manager = new QuotaManager()

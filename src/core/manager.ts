@@ -1,5 +1,5 @@
-import type { QuotaConfig, AuthCardItem, IQuotaProvider, AccountConfigItem, TestConnectionResult, QuotaAlarm, ModelRouteRecommendation, QuotaSparklinePoint } from './types.ts'
-import { getRefreshIntervalSeconds } from './types.ts'
+import type { QuotaConfig, AuthCardItem, IQuotaProvider, AccountConfigItem, TestConnectionResult, QuotaAlarm, ModelRouteRecommendation, QuotaSparklinePoint, MetricWindow, QuotaBalanceInfo } from './types.ts'
+import { getRefreshIntervalSeconds, isQuantified, windowQuotaKind } from './types.ts'
 import { CursorProvider } from '../providers/cursor.ts'
 import { CodexProvider } from '../providers/codex.ts'
 import { AntigravityProvider } from '../providers/antigravity.ts'
@@ -20,7 +20,7 @@ import { OAuthManager } from './oauth.ts'
 import { QuotaHistoryManager } from './history.ts'
 import { QuotaAlarmDetector } from './alarm.ts'
 import { sanitizeProxyUrl } from './fetch.ts'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, renameSync, copyFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { atomicWriteJsonSync } from './paths.ts'
@@ -165,11 +165,15 @@ interface CacheEntry {
   fetchedAt: number
 }
 
+/**
+ * Mask a configured secret for the browser DTO.
+ *
+ * Fixed-width bullets only: keeping the first/last four characters used to leak
+ * eight real key characters through `GET /config`.
+ */
 function maskSecret(val?: string): string {
   if (!val) return ''
-  const trimmed = String(val).trim()
-  if (trimmed.length <= 8) return '••••••••'
-  return `${trimmed.slice(0, 4)}••••${trimmed.slice(-4)}`
+  return '••••••••'
 }
 
 function restoreMaskedSecrets(incoming: any, existing: any): any {
@@ -189,11 +193,18 @@ function restoreMaskedSecrets(incoming: any, existing: any): any {
       return prev ? restoreMaskedSecrets(item, prev) : item
     })
   }
+  // A masked secret may only be replayed at the endpoint it was configured for.
+  // Changing `baseUrl`/`provider` means the user must re-enter the key (audit A3):
+  // otherwise an attacker could read a mask from /config, repoint baseUrl at their
+  // own host and have the real key attached to the request.
+  const identityChanged =
+    (res.baseUrl !== undefined && existing.baseUrl !== undefined && res.baseUrl !== existing.baseUrl) ||
+    (res.provider !== undefined && existing.provider !== undefined && res.provider !== existing.provider)
+
   for (const k of Object.keys(res)) {
     if (typeof res[k] === 'string' && (res[k] === '***' || res[k] === '••••••••' || res[k].includes('••••'))) {
-      if (existing[k] !== undefined) {
-        res[k] = existing[k]
-      }
+      if (identityChanged) res[k] = ''
+      else if (existing[k] !== undefined) res[k] = existing[k]
     } else if (typeof res[k] === 'object' && res[k] !== null) {
       res[k] = restoreMaskedSecrets(res[k], existing[k])
     }
@@ -292,6 +303,28 @@ function mergeSecrets(config: QuotaConfig, secrets: Partial<SecretBundle> | unde
   return target
 }
 
+export interface QuotaCardsResult {
+  cards: AuthCardItem[]
+  allCards: AuthCardItem[]
+  alarms: QuotaAlarm[]
+  lastUpdated: number
+  persistenceDegraded?: boolean
+  lastError?: string
+}
+
+/** A `force` refresh within this window reuses the cache instead of hitting upstream again. */
+const FORCE_MIN_INTERVAL_MS = 5000
+/** Error-card exponential backoff: 60s, 120s, ... capped at 10 minutes. */
+const ERROR_BACKOFF_BASE_MS = 60_000
+const ERROR_BACKOFF_MAX_MS = 600_000
+const ERROR_BACKOFF_FACTOR = 2
+
+interface InstanceTask {
+  id: string
+  providerName: string
+  accountConfig?: AccountConfigItem
+}
+
 export class QuotaManager {
   private providers: Map<string, IQuotaProvider> = new Map()
   public oauthManager = new OAuthManager()
@@ -299,6 +332,19 @@ export class QuotaManager {
   public alarmDetector = new QuotaAlarmDetector()
 
   private cardCache: Map<string, CacheEntry> = new Map()
+  /** Per-instance single flight: concurrent refreshes of one instance share one provider call. */
+  private inflightTasks: Map<string, Promise<{ card: AuthCardItem; fetched: boolean } | null>> = new Map()
+  /** Whole-round single flight keyed by provider filter ('' = full sweep). */
+  private inflightRounds: Map<string, Promise<QuotaCardsResult>> = new Map()
+  /** Last time a real upstream refresh was started, per instance (force throttling). */
+  private lastForcedAt: Map<string, number> = new Map()
+  /** Failure backoff state per instance. */
+  private backoffs: Map<string, { failures: number; retryAt: number }> = new Map()
+  /** Bumped on every config save; in-flight results from older generations never reach the cache. */
+  private configGeneration = 0
+  private lastError: string | undefined
+  private lastPersistError: string | undefined
+
   private configPath: string
   private secretsPath: string
   private config: QuotaConfig = {}
@@ -336,10 +382,13 @@ export class QuotaManager {
   }
 
   /** Persist the secret half first, then the secret-free config, both atomically. */
-  private persistSplit(): void {
+  private persistSplit(): boolean {
     const { publicConfig, secrets } = splitSecrets(this.config)
-    atomicWriteJsonSync(this.secretsPath, { version: 1, secrets }, 0o600)
-    atomicWriteJsonSync(this.configPath, publicConfig, 0o600)
+    const secretsOk = atomicWriteJsonSync(this.secretsPath, { version: 1, secrets }, 0o600)
+    const configOk = atomicWriteJsonSync(this.configPath, publicConfig, 0o600)
+    const ok = secretsOk && configOk
+    this.lastPersistError = ok ? undefined : '配置持久化失败（磁盘只读或空间不足）'
+    return ok
   }
 
   private registerDefaultProviders(): void {
@@ -362,7 +411,32 @@ export class QuotaManager {
       new CustomApiProvider(),
     ]
     for (const p of list) {
+      // OAuth providers refresh access tokens in memory while fetching. Persist the
+      // refreshed pair immediately, otherwise a restart replays a stale token and a
+      // rotated refresh token is lost.
+      ;(p as any).onTokenRefreshed = (info: { accessToken?: string; refreshToken?: string; expiresAt?: number }) => {
+        this.persistRefreshedTokens(p.name, info)
+      }
       this.providers.set(p.name, p)
+    }
+  }
+
+  /** Write refreshed OAuth tokens into the config (secrets are split out on save). */
+  private persistRefreshedTokens(
+    providerName: string,
+    info: { accessToken?: string; refreshToken?: string; expiresAt?: number },
+  ): void {
+    if (!info || typeof info.accessToken !== 'string' || info.accessToken.length === 0) return
+    const current = (this.config as any)[providerName]
+    if (!current || typeof current !== 'object') return
+    const oauth = { ...(current.oauth || {}) }
+    oauth.accessToken = info.accessToken
+    if (typeof info.refreshToken === 'string' && info.refreshToken.length > 0) oauth.refreshToken = info.refreshToken
+    if (typeof info.expiresAt === 'number' && Number.isFinite(info.expiresAt)) oauth.expiresAt = info.expiresAt
+    try {
+      this.saveConfig({ [providerName]: { ...current, oauth } } as any)
+    } catch (error: any) {
+      console.warn('[dsh-quota] failed to persist refreshed tokens:', error?.message ?? error)
     }
   }
 
@@ -405,7 +479,7 @@ export class QuotaManager {
           alarmThresholdPercent: 15,
           enableNotification: true,
         }
-        this.saveConfig(this.config)
+        this.persistSplit()
       }
     } catch {
       // Keep the unreadable file instead of silently overwriting it on the next save.
@@ -471,42 +545,59 @@ export class QuotaManager {
     }
 
     this.config = merged
+    // A new configuration invalidates every cached card and every in-flight result:
+    // an old-generation refresh must not write cards derived from the old config back
+    // into the new cache (audit Q3), and a stale backoff must not silence a new key.
+    this.configGeneration += 1
     this.cardCache.clear()
-    this.persistSplit()
+    this.backoffs.clear()
+    this.lastForcedAt.clear()
+    this.inflightTasks.clear()
+    this.inflightRounds.clear()
+    if (!this.persistSplit()) {
+      throw new Error(this.lastPersistError ?? '配置写入失败')
+    }
   }
 
   getSafeConfig(): QuotaConfig {
     const copy: any = JSON.parse(JSON.stringify(this.config || {}))
-    const keyProps = ['apiKey', 'sessionToken', 'token']
+    const maskOauth = (owner: any): void => {
+      if (!owner || typeof owner !== 'object' || !owner.oauth || typeof owner.oauth !== 'object') return
+      if (owner.oauth.accessToken) owner.oauth.accessToken = maskSecret(owner.oauth.accessToken)
+      if (owner.oauth.refreshToken) owner.oauth.refreshToken = maskSecret(owner.oauth.refreshToken)
+      // `email` / `accountId` stay readable: the UI shows which account is connected.
+    }
     if (typeof copy.httpProxy === 'string' && copy.httpProxy) {
       copy.httpProxy = sanitizeProxyUrl(copy.httpProxy)
     }
-    for (const [k, v] of Object.entries(copy)) {
-      if (v && typeof v === 'object' && !Array.isArray(v)) {
-        for (const kp of keyProps) {
-          if ((v as any)[kp]) (v as any)[kp] = maskSecret((v as any)[kp])
+    for (const value of Object.values(copy)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+      for (const key of SECRET_STRING_KEYS) {
+        if (typeof (value as any)[key] === 'string' && (value as any)[key]) {
+          (value as any)[key] = maskSecret((value as any)[key])
         }
-        if ((v as any).oauth?.accessToken) (v as any).oauth.accessToken = maskSecret((v as any).oauth.accessToken)
-        if ((v as any).oauth?.refreshToken) (v as any).oauth.refreshToken = maskSecret((v as any).oauth.refreshToken)
       }
+      maskOauth(value)
     }
     if (Array.isArray(copy.custom_compatible)) {
-      copy.custom_compatible = copy.custom_compatible.map((item: any) => ({
-        ...item,
-        apiKey: item.apiKey ? maskSecret(item.apiKey) : '',
-      }))
+      copy.custom_compatible = copy.custom_compatible.map((item: any) => {
+        const out: any = { ...item }
+        for (const key of SECRET_STRING_KEYS) {
+          if (typeof out[key] === 'string' && out[key]) out[key] = maskSecret(out[key])
+        }
+        maskOauth(out)
+        return out
+      })
     }
     if (Array.isArray(copy.accounts)) {
-      copy.accounts = copy.accounts.map((item: any) => ({
-        ...item,
-        apiKey: item.apiKey ? maskSecret(item.apiKey) : undefined,
-        sessionToken: item.sessionToken ? maskSecret(item.sessionToken) : undefined,
-        oauth: item.oauth ? {
-          ...item.oauth,
-          accessToken: item.oauth.accessToken ? maskSecret(item.oauth.accessToken) : undefined,
-          refreshToken: item.oauth.refreshToken ? maskSecret(item.oauth.refreshToken) : undefined,
-        } : undefined,
-      }))
+      copy.accounts = copy.accounts.map((item: any) => {
+        const out: any = { ...item }
+        for (const key of SECRET_STRING_KEYS) {
+          if (typeof out[key] === 'string' && out[key]) out[key] = maskSecret(out[key])
+        }
+        maskOauth(out)
+        return out
+      })
     }
     return copy
   }
@@ -520,10 +611,15 @@ export class QuotaManager {
     const authPath = join(codexDir, 'auth.json')
     try {
       mkdirSync(codexDir, { recursive: true })
-      let auth: { auth_mode?: string; tokens?: Record<string, string | undefined> } = {}
+      let auth: { auth_mode?: string; tokens?: Record<string, string | undefined> } & Record<string, any> = {}
       if (existsSync(authPath)) {
+        // Keep a copy before touching a file the Codex CLI also owns.
+        try {
+          copyFileSync(authPath, `${authPath}.dsh-quota-backup-${Date.now()}`)
+        } catch {}
         auth = JSON.parse(readFileSync(authPath, 'utf8'))
       }
+      // Merge instead of rebuilding: CLIs keep `last_refresh` and future fields here.
       auth.auth_mode = 'chatgpt'
       auth.tokens = {
         ...auth.tokens,
@@ -572,17 +668,19 @@ export class QuotaManager {
     }
 
     // 3. Default single instances from standard config
+    // Set membership instead of `tasks.some(...)` keeps this O(n) as account counts grow.
+    const seenIds = new Set(tasks.map(t => t.id))
     for (const [pName] of this.providers.entries()) {
       if (pName === 'custom_api') continue
       // Only add if not already covered in accounts
-      const existsInAccounts = tasks.some(t => t.id === pName)
-      if (!existsInAccounts) {
+      if (!seenIds.has(pName)) {
         const provCfg = (this.config as any)[pName]
         if (provCfg && provCfg.enabled !== false) {
           tasks.push({
             id: pName,
             providerName: pName,
           })
+          seenIds.add(pName)
         }
       }
     }
@@ -594,86 +692,85 @@ export class QuotaManager {
     )
   }
 
-  private generateSparkline(instanceId: string, _currentRem: number): QuotaSparklinePoint[] {
+  private generateSparkline(instanceId: string): QuotaSparklinePoint[] {
     return this.historyManager.getUsageTrendPoints(instanceId, 7)
   }
 
-  async getQuotaCards(forceRefresh = false, providerFilter?: string): Promise<{
-    cards: AuthCardItem[]
-    allCards: AuthCardItem[]
-    alarms: QuotaAlarm[]
-    lastUpdated: number
-  }> {
-    const intervalSec = getRefreshIntervalSeconds(this.config)
-    const ttl = Math.max(5000, intervalSec * 1000)
-    const now = Date.now()
+  /**
+   * Single-flight quota round.
+   *
+   * Concurrent callers for the same scope share one upstream sweep (audit A6): a
+   * manual refresh racing the poller must not double the provider requests. Each
+   * caller still observes its own AbortSignal, so a closed tab cannot cancel the
+   * sweep other callers are waiting on.
+   */
+  async getQuotaCards(
+    forceRefresh = false,
+    providerFilter?: string,
+    signal?: AbortSignal,
+  ): Promise<QuotaCardsResult> {
+    const flightKey = providerFilter ? `filter:${providerFilter}` : 'all'
+    let flight = this.inflightRounds.get(flightKey)
+    if (!flight) {
+      flight = this.runRound(forceRefresh, providerFilter, signal)
+      this.inflightRounds.set(flightKey, flight)
+      const clear = () => {
+        if (this.inflightRounds.get(flightKey) === flight) this.inflightRounds.delete(flightKey)
+      }
+      void flight.then(clear, clear)
+    }
+    return this.raceAbort(flight, signal)
+  }
 
+  private async runRound(
+    forceRefresh: boolean,
+    providerFilter: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<QuotaCardsResult> {
+    try {
+      await this.historyManager.ready
+    } catch {}
+    const generation = this.configGeneration
     const tasks = this.buildInstanceTasks(providerFilter)
-    const settled = await runWithConcurrency(tasks, async ({ id, providerName, accountConfig }) => {
-      const cached = this.cardCache.get(id)
-      if (!forceRefresh && cached && (now - cached.fetchedAt) < ttl) {
-        return cached.card
-      }
+    let anyFetched = false
 
-      const provider = this.providers.get(providerName)
-      if (!provider) return null
-
-      try {
-        const result = await provider.fetchCard(this.config, accountConfig)
-        const card = result.card
-        // Calculate burn rate & estimated hours
-        const rep = this.representativeWindow(card)
-        const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(id, rep.remainingPercent)
-        card.burnRatePerHour = burnRatePerHour
-        card.estimatedHoursLeft = estimatedHoursLeft
-        card.sparkline = this.generateSparkline(id, rep.remainingPercent)
-
-        const customName = (this.config as any)[providerName]?.name || this.config.customNames?.[id] || this.config.customNames?.[providerName]
-        if (customName) {
-          card.name = customName
-        }
-
-        this.cardCache.set(id, { card, fetchedAt: now })
-        return card
-      } catch (err: any) {
-        const customName = (this.config as any)[providerName]?.name || this.config.customNames?.[id] || this.config.customNames?.[providerName]
-        const errCard: AuthCardItem = {
-          id,
-          name: customName || accountConfig?.name || provider.name,
-          provider: providerName,
-          category: provider.category,
-          status: 'error',
-          error: err.message,
-          groups: [],
-          lastUpdated: now,
-        }
-        this.cardCache.set(id, { card: errCard, fetchedAt: now })
-        return errCard
-      }
+    const settled = await runWithConcurrency(tasks, async (task) => {
+      const result = await this.refreshInstance(task, { force: forceRefresh, signal, generation })
+      if (result?.fetched) anyFetched = true
+      return result?.card ?? null
     }, 5)
 
+    if (signal?.aborted) throw this.abortError()
+
     const allCards: AuthCardItem[] = []
-    for (const r of settled) {
-      if (r.status === 'fulfilled' && r.value) {
-        allCards.push(r.value)
+    for (const entry of settled) {
+      if (entry.status === 'fulfilled' && entry.value) allCards.push(entry.value)
+    }
+
+    // A fully cached round carries the same values as the previous one: skip the
+    // journal work entirely (audit A21). Only rounds that hit upstream append.
+    if (anyFetched) {
+      try {
+        this.historyManager.recordSnapshots(allCards)
+      } catch (err: any) {
+        this.lastError = `历史写入失败: ${err?.message ?? err}`
       }
     }
 
-    // Save history snapshots
-    this.historyManager.recordSnapshots(allCards)
+    const alarms = this.alarmDetector.detectAlarms(
+      allCards,
+      this.config.alarmThresholdPercent ?? 15,
+      { prune: !providerFilter },
+    )
 
-    // Detect alarms
-    const alarms = this.alarmDetector.detectAlarms(allCards, this.config.alarmThresholdPercent ?? 15)
-
-    // Sort & filter according to order
     const orderList = this.config.providerOrder ?? DEFAULT_PROVIDER_ORDER
     const enabledSet = new Set(this.config.enabledProviders ?? DEFAULT_PROVIDER_ORDER)
 
-    const visibleCards = allCards.filter(c => {
-      if (c.status === 'disabled') return false
-      const isEnabled = enabledSet.has(c.id) || enabledSet.has(c.provider)
-      if (c.provider === 'custom_api') return isEnabled
-      return isEnabled && (this.config as any)[c.provider]?.enabled !== false
+    const visibleCards = allCards.filter((card) => {
+      if (card.status === 'disabled') return false
+      const isEnabled = enabledSet.has(card.id) || enabledSet.has(card.provider)
+      if (card.provider === 'custom_api') return isEnabled
+      return isEnabled && (this.config as any)[card.provider]?.enabled !== false
     })
 
     visibleCards.sort((a, b) => {
@@ -686,58 +783,239 @@ export class QuotaManager {
       cards: visibleCards,
       allCards,
       alarms,
-      lastUpdated: now,
+      // Completion time, not request start: TTL counts from when data actually arrived (audit A11).
+      lastUpdated: Date.now(),
+      persistenceDegraded: this.historyManager.persistenceDegraded || this.lastPersistError !== undefined,
+      lastError: this.lastError,
     }
+  }
+
+  private abortError(): Error {
+    const err: any = new Error('请求已取消')
+    err.name = 'AbortError'
+    err.code = 'ABORT_ERR'
+    return err
+  }
+
+  /** Reject a caller as soon as its own signal aborts, without cancelling the shared sweep. */
+  private raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return promise
+    if (signal.aborted) return Promise.reject(this.abortError())
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => {
+        cleanup()
+        reject(this.abortError())
+      }
+      const cleanup = (): void => signal.removeEventListener('abort', onAbort)
+      signal.addEventListener('abort', onAbort, { once: true })
+      promise.then(
+        (value) => {
+          cleanup()
+          resolve(value)
+        },
+        (err) => {
+          cleanup()
+          reject(err)
+        },
+      )
+    })
+  }
+
+  /**
+   * Cache/single-flight/backoff gate in front of one provider call.
+   *
+   * Order of precedence: TTL cache → force throttle (5 s) → failure backoff →
+   * per-instance single flight → upstream.
+   */
+  private async refreshInstance(
+    task: InstanceTask,
+    options: { force: boolean; signal?: AbortSignal; generation: number },
+  ): Promise<{ card: AuthCardItem; fetched: boolean } | null> {
+    const { id, providerName, accountConfig } = task
+    const now = Date.now()
+    const cached = this.cardCache.get(id)
+
+    if (cached && !options.force) {
+      const intervalSec = getRefreshIntervalSeconds(this.config)
+      const ttl = Math.max(5000, intervalSec * 1000)
+      if (now - cached.fetchedAt < ttl) return { card: cached.card, fetched: false }
+    }
+
+    if (options.force && cached) {
+      const lastForced = this.lastForcedAt.get(id) ?? 0
+      if (now - lastForced < FORCE_MIN_INTERVAL_MS) return { card: cached.card, fetched: false }
+    }
+
+    // A failing upstream is retried on an exponential schedule, not on every poll.
+    const backoff = this.backoffs.get(id)
+    if (backoff && backoff.retryAt > now) {
+      return cached ? { card: cached.card, fetched: false } : null
+    }
+
+    const inFlight = this.inflightTasks.get(id)
+    if (inFlight) return inFlight
+
+    const flight = (async (): Promise<{ card: AuthCardItem; fetched: boolean } | null> => {
+      const provider = this.providers.get(providerName)
+      if (!provider) return null
+      if (options.signal?.aborted) throw this.abortError()
+
+      this.lastForcedAt.set(id, Date.now())
+      const configSnapshot = this.config
+      try {
+        const result = await provider.fetchCard(configSnapshot, accountConfig, options.signal)
+        if (options.signal?.aborted) throw this.abortError()
+        const card = result.card
+        this.decorateCard(card, id, providerName, configSnapshot)
+        if (options.generation === this.configGeneration) {
+          // Completion timestamp: a 2 s provider call must not shorten the cache TTL.
+          this.cardCache.set(id, { card, fetchedAt: Date.now() })
+          this.backoffs.delete(id)
+        }
+        return { card, fetched: true }
+      } catch (err: any) {
+        if (options.signal?.aborted) throw this.abortError()
+        const failures = (this.backoffs.get(id)?.failures ?? 0) + 1
+        const delayMs = Math.min(
+          ERROR_BACKOFF_MAX_MS,
+          ERROR_BACKOFF_BASE_MS * ERROR_BACKOFF_FACTOR ** (failures - 1),
+        )
+        const retryAt = Date.now() + delayMs
+        const errorCard = this.makeErrorCard(id, providerName, accountConfig, provider, err, retryAt)
+        this.lastError = `${providerName}: ${err?.message ?? err}`
+        if (options.generation === this.configGeneration) {
+          this.backoffs.set(id, { failures, retryAt })
+          this.cardCache.set(id, { card: errorCard, fetchedAt: Date.now() })
+        }
+        return { card: errorCard, fetched: true }
+      }
+    })()
+
+    this.inflightTasks.set(id, flight)
+    try {
+      return await flight
+    } finally {
+      if (this.inflightTasks.get(id) === flight) this.inflightTasks.delete(id)
+    }
+  }
+
+  private makeErrorCard(
+    id: string,
+    providerName: string,
+    accountConfig: AccountConfigItem | undefined,
+    provider: IQuotaProvider,
+    err: any,
+    retryAt: number,
+  ): AuthCardItem {
+    const customName =
+      (this.config as any)[providerName]?.name ||
+      this.config.customNames?.[id] ||
+      this.config.customNames?.[providerName]
+    const card: AuthCardItem = {
+      id,
+      name: customName || accountConfig?.name || provider.name,
+      provider: providerName,
+      category: provider.category,
+      status: 'error',
+      error: err?.message ?? String(err),
+      groups: [],
+      lastUpdated: Date.now(),
+    }
+    // Surfaced to the UI/agent so a failing instance can show when it will retry.
+    ;(card as any).retryAfter = retryAt
+    ;(card as any).retryAfterMs = Math.max(0, retryAt - Date.now())
+    return card
+  }
+
+  private decorateCard(card: AuthCardItem, id: string, providerName: string, configSnapshot: QuotaConfig = this.config): void {
+    const representative = this.representativeWindow(card)
+    if (representative.remainingPercent !== undefined) {
+      const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(
+        id,
+        representative.remainingPercent,
+      )
+      card.burnRatePerHour = burnRatePerHour
+      card.estimatedHoursLeft = estimatedHoursLeft
+    }
+    card.sparkline = this.generateSparkline(id)
+
+    const customName =
+      (configSnapshot as any)[providerName]?.name ||
+      this.config.customNames?.[id] ||
+      this.config.customNames?.[providerName]
+    if (customName) card.name = customName
   }
 
   /**
    * Pick one window to represent a card's short-cycle trend.
    *
-   * Index 0 is server order, which changes when a new pool (e.g. Gemini 4 Argon)
-   * appears; keeping a series on whatever happened to be first would splice two
-   * incomparable pools into one burn-rate sample. Prefer an active, non-unknown
-   * window and fall back to the first window that exists.
+   * Only a quantified window can drive burn rate. Index 0 is server order, which
+   * changes when a new pool appears; prefer an active `usage` window and never
+   * treat a balance amount as a percentage.
    */
-  private representativeWindow(card: AuthCardItem): { remainingPercent: number; windowId?: string } {
-    const all = card.groups.flatMap(g => g.windows)
-    const preferred = all.find(w => w.status !== 'unknown' && w.status !== 'disabled' && w.remainingPercent > 0)
-      ?? all.find(w => w.status !== 'unknown' && w.status !== 'disabled')
-      ?? all[0]
-    if (!preferred) return { remainingPercent: 100 }
-    return { remainingPercent: preferred.remainingPercent, windowId: preferred.id }
+  private representativeWindow(card: AuthCardItem): { remainingPercent?: number; windowId?: string } {
+    const windows: MetricWindow[] = (card.groups ?? []).flatMap((group) => group.windows ?? [])
+    const quantified = windows.filter(
+      (win) => win.status !== 'unknown' && win.status !== 'disabled' && isQuantified(win),
+    )
+    const preferred = quantified.find((win) => win.status !== 'exhausted') ?? quantified[0]
+    if (preferred) return { remainingPercent: preferred.remainingPercent, windowId: preferred.id }
+    const balanceWindow = windows.find((win) => windowQuotaKind(win) === 'balance')
+    return balanceWindow ? { windowId: balanceWindow.id } : {}
   }
 
-  async refreshSingleProvider(instanceOrProvider: string): Promise<AuthCardItem | undefined> {
+  async refreshSingleProvider(instanceOrProvider: string, signal?: AbortSignal): Promise<AuthCardItem | undefined> {
+    try {
+      await this.historyManager.ready
+    } catch {}
     const tasks = this.buildInstanceTasks()
-    const task = tasks.find(t => t.id === instanceOrProvider || t.providerName === instanceOrProvider)
+    const task = tasks.find((t) => t.id === instanceOrProvider || t.providerName === instanceOrProvider)
     if (!task) return undefined
 
-    const provider = this.providers.get(task.providerName)
-    if (!provider) return undefined
+    const result = await this.refreshInstance(task, {
+      force: true,
+      signal,
+      generation: this.configGeneration,
+    })
+    if (!result) return undefined
 
-    try {
-      const res = await provider.fetchCard(this.config, task.accountConfig)
-      const card = res.card
-      const rep = this.representativeWindow(card)
-      const { burnRatePerHour, estimatedHoursLeft } = this.historyManager.calculateBurnRate(task.id, rep.remainingPercent)
-      card.burnRatePerHour = burnRatePerHour
-      card.estimatedHoursLeft = estimatedHoursLeft
-      card.sparkline = this.generateSparkline(task.id, rep.remainingPercent)
-
-      const customName = (this.config as any)[task.providerName]?.name || this.config.customNames?.[task.id] || this.config.customNames?.[task.providerName]
-      if (customName) {
-        card.name = customName
+    if (result.fetched) {
+      try {
+        this.historyManager.recordSnapshots([result.card])
+      } catch (err: any) {
+        this.lastError = `历史写入失败: ${err?.message ?? err}`
       }
+    }
+    return result.card
+  }
 
-      this.cardCache.set(task.id, { card, fetchedAt: Date.now() })
-      this.historyManager.recordSnapshots([card])
-      return card
-    } catch {
-      return undefined
+  /**
+   * Fire-and-forget refresh used by routes and OAuth callbacks: never rejects,
+   * records `lastError` for status reporting (audit A7).
+   */
+  async safeRefresh(providerFilter?: string, signal?: AbortSignal): Promise<boolean> {
+    try {
+      await this.getQuotaCards(true, providerFilter, signal)
+      this.lastError = undefined
+      return true
+    } catch (err: any) {
+      this.lastError = err?.message ?? String(err)
+      try {
+        console.warn('[dsh-quota] background refresh failed:', this.lastError)
+      } catch {}
+      return false
     }
   }
 
-  async testConnection(providerName: string, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+  getLastError(): string | undefined {
+    return this.lastError
+  }
+
+  async testConnection(
+    providerName: string,
+    accountConfig?: AccountConfigItem,
+    signal?: AbortSignal,
+  ): Promise<TestConnectionResult> {
     const provider = this.providers.get(providerName)
     if (!provider) {
       return {
@@ -748,13 +1026,13 @@ export class QuotaManager {
     }
 
     if (typeof provider.testConnection === 'function') {
-      return provider.testConnection(this.config, accountConfig)
+      return provider.testConnection(this.config, accountConfig, signal)
     }
 
     // Default test via fetchCard
     try {
       const start = Date.now()
-      const res = await provider.fetchCard(this.config, accountConfig)
+      const res = await provider.fetchCard(this.config, accountConfig, signal)
       const latencyMs = Date.now() - start
       if (res.card.status === 'ok' || res.card.status === 'warn') {
         return {
@@ -780,7 +1058,7 @@ export class QuotaManager {
     }
   }
 
-  async testAllConnections(): Promise<Record<string, TestConnectionResult>> {
+  async testAllConnections(signal?: AbortSignal): Promise<Record<string, TestConnectionResult>> {
     // Only instance tasks the user actually configured (provider enabled or account listed).
     // Never append disabled providers here: probing them can read local IDE/CLI credentials
     // the user explicitly switched off.
@@ -788,7 +1066,7 @@ export class QuotaManager {
     const results: Record<string, TestConnectionResult> = {}
 
     await runWithConcurrency(tasks, async (t) => {
-      const res = await this.testConnection(t.providerName, t.accountConfig)
+      const res = await this.testConnection(t.providerName, t.accountConfig, signal)
       results[t.id] = res
       return res
     }, 5)
@@ -805,44 +1083,72 @@ export class QuotaManager {
       ? cards.filter(c => c.provider.toLowerCase().includes(providerName.toLowerCase()) || c.id.toLowerCase().includes(providerName.toLowerCase()))
       : cards
 
-    // Build intelligent routing recommendation
-    const healthyServices = cards.filter(c => c.status === 'ok')
-    const warningServices = cards.filter(c => c.status === 'warn')
+    // Smart routing only trusts real percentages. A `liveness`/`unknown`/`balance`
+    // card is connected, but it never contributes a "quota is healthy" claim (0.4.1
+    // data-truthfulness contract): the primary is the ok card whose worst quantified
+    // window has the most remaining headroom; deepseek only wins exact ties.
+    const ranked: Array<{ card: AuthCardItem; remaining: number }> = []
+    for (const card of cards) {
+      if (card.status === 'error' || card.status === 'disabled') continue
+      const remaining = this.worstQuantifiedPercent(card)
+      if (remaining !== undefined) ranked.push({ card, remaining })
+    }
+    ranked.sort((a, b) => {
+      if (b.remaining !== a.remaining) return b.remaining - a.remaining
+      const aPreferred = a.card.provider === 'deepseek' ? 1 : 0
+      const bPreferred = b.card.provider === 'deepseek' ? 1 : 0
+      if (bPreferred !== aPreferred) return bPreferred - aPreferred
+      return a.card.name.localeCompare(b.card.name)
+    })
+    const healthyRanked = ranked.filter((entry) => entry.card.status === 'ok')
+    const warningRanked = ranked.filter((entry) => entry.card.status === 'warn')
 
     let recommendation: ModelRouteRecommendation
-    if (healthyServices.length > 0) {
-      const primary = healthyServices.find(c => c.provider === 'deepseek')
-        || healthyServices.find(c => c.provider === 'siliconflow')
-        || healthyServices[0]!
+    if (healthyRanked.length > 0) {
+      const { card: primary, remaining } = healthyRanked[0]!
       const meta = PROVIDER_DEFAULT_MODELS[primary.provider] || { primaryId: primary.provider, available: [primary.provider], role: '通用大模型' }
-      const fallbacks = healthyServices.filter(c => c.id !== primary.id).slice(0, 4).map(c => {
-        const fMeta = PROVIDER_DEFAULT_MODELS[c.provider] || { primaryId: c.provider, available: [c.provider], role: '备用模型' }
-        return {
-          provider: c.provider,
-          modelId: fMeta.primaryId,
-          name: `${c.name} (${fMeta.primaryId})`,
-          reason: `${fMeta.role} · 额度充足健康在线`,
-        }
-      })
+      const fallbacks = healthyRanked
+        .filter((entry) => entry.card.id !== primary.id)
+        .slice(0, 4)
+        .map((entry) => {
+          const fMeta = PROVIDER_DEFAULT_MODELS[entry.card.provider] || { primaryId: entry.card.provider, available: [entry.card.provider], role: '备用模型' }
+          return {
+            provider: entry.card.provider,
+            modelId: fMeta.primaryId,
+            name: `${entry.card.name} (${fMeta.primaryId})`,
+            reason: `${fMeta.role} · 量化剩余 ${Math.round(entry.remaining)}%`,
+          }
+        })
       recommendation = {
         primaryModel: `${primary.name} (${meta.primaryId})`,
         primaryModelId: meta.primaryId,
         primaryProvider: primary.provider,
         status: 'healthy',
-        reason: `首选 ${primary.name} · 调用模型 ${meta.primaryId}（${meta.role} · 额度正常可用）`,
+        reason: `首选 ${primary.name} · 调用模型 ${meta.primaryId}（最低窗口剩余 ${Math.round(remaining)}% · ${meta.role}）`,
         availableModels: meta.available,
         fallbackRoutes: fallbacks,
       }
-    } else if (warningServices.length > 0) {
-      const primary = warningServices[0]!
+    } else if (warningRanked.length > 0) {
+      const { card: primary, remaining } = warningRanked[0]!
       const meta = PROVIDER_DEFAULT_MODELS[primary.provider] || { primaryId: primary.provider, available: [primary.provider], role: '告警备用' }
       recommendation = {
         primaryModel: `${primary.name} (${meta.primaryId})`,
         primaryModelId: meta.primaryId,
         primaryProvider: primary.provider,
         status: 'warning',
-        reason: `首选 ${primary.name} · 模型 ${meta.primaryId} 额度已低于警戒线，建议谨慎执行高消耗长任务`,
+        reason: `首选 ${primary.name} · 模型 ${meta.primaryId} 最低窗口剩余 ${Math.round(remaining)}%，已低于警戒线，建议谨慎执行高消耗长任务`,
         availableModels: meta.available,
+        fallbackRoutes: [],
+      }
+    } else if (cards.some((card) => card.status === 'ok')) {
+      // Connected, but no provider returned a real ratio: never call that "sufficient".
+      recommendation = {
+        primaryModel: 'none',
+        primaryModelId: 'none',
+        primaryProvider: 'none',
+        status: 'warning',
+        reason: '已连接的服务均未提供可量化额度（仅连通性或余额），无法判断额度是否充足，请先查看余额或手动确认',
+        availableModels: [],
         fallbackRoutes: [],
       }
     } else {
@@ -865,6 +1171,10 @@ export class QuotaManager {
       recommendation,
       services: targetCards.map(c => {
         const modelMeta = PROVIDER_DEFAULT_MODELS[c.provider]
+        const windows = (c.groups ?? []).flatMap(g => g.windows ?? [])
+        const hasQuantified = windows.some(w => isQuantified(w))
+        const hasBalance = windows.some(w => windowQuotaKind(w) === 'balance')
+        const hasLiveness = windows.some(w => windowQuotaKind(w) === 'liveness')
         return {
           id: c.id,
           name: c.name,
@@ -877,19 +1187,59 @@ export class QuotaManager {
           account: c.account,
           error: c.error,
           balance: c.balance,
+          // Balance-only services report money, never a synthesized percentage.
+          balanceText: this.formatBalanceText(c.balance),
+          quotaKind: hasQuantified ? 'usage' : hasBalance || c.balance ? 'balance' : hasLiveness ? 'liveness' : 'unknown',
+          worstRemainingPercent: this.worstQuantifiedPercent(c),
           burnRatePerHour: c.burnRatePerHour ? `${c.burnRatePerHour}%/h` : undefined,
           estimatedHoursLeft: c.estimatedHoursLeft ? `${c.estimatedHoursLeft} 小时` : undefined,
           quotas: c.groups.map(g => ({
             group: g.title,
-            windows: g.windows.map(w => ({
-              label: w.label,
-              remaining: `${w.remainingPercent}%`,
-              used: `${w.usedPercent}%`,
-              subtitle: w.subtitle,
-            })),
+            windows: g.windows.map(w => {
+              const windowKind = windowQuotaKind(w)
+              const quantified = isQuantified(w)
+              return {
+                label: w.label,
+                kind: windowKind,
+                // `—` for liveness/unknown; the amount text for balance; a real % only for usage.
+                remaining: quantified
+                  ? `${w.remainingPercent}%`
+                  : windowKind === 'balance'
+                    ? (w.amountText ?? this.formatBalanceText(c.balance) ?? '—')
+                    : '—',
+                used: quantified ? `${w.usedPercent}%` : undefined,
+                subtitle: w.subtitle,
+                amountText: windowKind === 'balance' ? w.amountText : undefined,
+              }
+            }),
           })),
         }
       }),
     }
   }
+
+  /** Lowest remaining percent among quantified windows, or undefined when none exists. */
+  private worstQuantifiedPercent(card: AuthCardItem): number | undefined {
+    let worst: number | undefined
+    for (const group of card.groups ?? []) {
+      for (const win of group.windows ?? []) {
+        if (!isQuantified(win)) continue
+        if (worst === undefined || win.remainingPercent < worst) worst = win.remainingPercent
+      }
+    }
+    return worst
+  }
+
+  private formatBalanceText(balance?: QuotaBalanceInfo): string | undefined {
+    if (!balance) return undefined
+    const currency = balance.currency && balance.currency !== 'TOKEN' && balance.currency !== 'COUNT' ? balance.currency : ''
+    if (typeof balance.remaining === 'number' && Number.isFinite(balance.remaining)) {
+      return `${balance.remaining}${currency ? ` ${currency}` : ''}`
+    }
+    if (typeof balance.total === 'number' && Number.isFinite(balance.total)) {
+      return `${balance.total}${currency ? ` ${currency}` : ''}`
+    }
+    return undefined
+  }
+
 }

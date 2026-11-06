@@ -1,9 +1,47 @@
-import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem } from '../core/types.ts'
-import { formatQuotaResetText } from '../core/types.ts'
+import type { IQuotaProvider, QuotaConfig, ProviderResult, TestConnectionResult, AccountConfigItem, MetricWindow } from '../core/types.ts'
+import { formatQuotaResetText, isQuantified } from '../core/types.ts'
 import { getHomeConfigPaths, atomicWriteJsonSync } from '../core/paths.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fetchWithProxy } from '../core/fetch.ts'
 import { join } from 'node:path'
+
+/** Parse an upstream numeric field without ever turning null/undefined into 0. */
+function parseFinite(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+/** Normalize an upstream reset timestamp: epoch seconds, epoch milliseconds or ISO. */
+function normalizeResetAt(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value <= 0) return undefined
+    const ms = value < 1e11 ? value * 1000 : value
+    const date = new Date(ms)
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+  }
+  if (typeof value === 'string') {
+    const parsed = parseFinite(value)
+    if (parsed !== undefined) return normalizeResetAt(parsed)
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+  }
+  return undefined
+}
+
+interface TokenRefreshInfo {
+  accessToken: string
+  refreshToken?: string
+  expiresAt?: number
+}
 
 interface CodexAuth {
   auth_mode?: string
@@ -39,6 +77,12 @@ interface CodexUsage {
 export class CodexProvider implements IQuotaProvider {
   name = 'codex'
   category = 'official_cloud' as const
+
+  /**
+   * Optional persistence hook (contract A18/B7): the manager can assign this to
+   * persist a rotated token instead of losing the new refresh_token on restart.
+   */
+  onTokenRefreshed?: (info: TokenRefreshInfo) => void | Promise<void>
 
   private authPaths(): string[] {
     const paths: string[] = []
@@ -142,6 +186,14 @@ export class CodexProvider implements IQuotaProvider {
         config.codex.oauth.refreshToken = newRefreshToken
       }
 
+      // Persist through the optional manager hook so a rotated refresh_token is
+      // not lost on restart (A18). A missing hook is not an error.
+      if (this.onTokenRefreshed) {
+        try {
+          await this.onTokenRefreshed({ accessToken: newAccessToken, refreshToken: newRefreshToken, expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : undefined })
+        } catch {}
+      }
+
       if (creds.filePath && config?.codex?.syncLocalAuth === true && existsSync(creds.filePath)) {
         try {
           const raw = readFileSync(creds.filePath, 'utf8')
@@ -159,7 +211,7 @@ export class CodexProvider implements IQuotaProvider {
     }
   }
 
-  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult> {
+  async testConnection(config: QuotaConfig, accountConfig?: AccountConfigItem, signal?: AbortSignal): Promise<TestConnectionResult> {
     const start = Date.now()
     const creds = this.loadAuth(config, accountConfig)
     if (!creds) {
@@ -178,12 +230,12 @@ export class CodexProvider implements IQuotaProvider {
       }
       if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
 
-      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000, config.proxyMode)
+      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers, signal }, config.httpProxy, 10000, config.proxyMode)
       if (res.status === 401 && creds.refreshToken) {
         const refreshed = await this.refreshAccessToken(creds, config.httpProxy, config, accountConfig)
         if (refreshed) {
           headers.Authorization = `Bearer ${refreshed}`
-          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 10000, config.proxyMode)
+          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers, signal }, config.httpProxy, 10000, config.proxyMode)
         }
       }
       const latencyMs = Date.now() - start
@@ -216,7 +268,7 @@ export class CodexProvider implements IQuotaProvider {
     }
   }
 
-  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult> {
+  async fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem, signal?: AbortSignal): Promise<ProviderResult> {
     const cardId = accountConfig?.id || 'codex'
     const cardName = accountConfig?.name || config.customNames?.codex || config.codex?.name || 'Codex (OpenAI)'
     const creds = this.loadAuth(config, accountConfig)
@@ -244,12 +296,12 @@ export class CodexProvider implements IQuotaProvider {
       }
       if (creds.accountId) headers['ChatGPT-Account-Id'] = creds.accountId
 
-      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000, config.proxyMode)
+      let res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers, signal }, config.httpProxy, 15000, config.proxyMode)
       if (res.status === 401 && creds.refreshToken) {
         const refreshed = await this.refreshAccessToken(creds, config.httpProxy, config, accountConfig)
         if (refreshed) {
           headers.Authorization = `Bearer ${refreshed}`
-          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers }, config.httpProxy, 15000, config.proxyMode)
+          res = await fetchWithProxy('https://chatgpt.com/backend-api/wham/usage', { headers, signal }, config.httpProxy, 15000, config.proxyMode)
         }
       }
       if (!res.ok) {
@@ -267,24 +319,30 @@ export class CodexProvider implements IQuotaProvider {
 
       const buildWindow = (win: UsageWindow | undefined, winId: string, defaultLabel: string, isWeeklyFallback = false): MetricWindow | null => {
         if (!win) return null
-        const used = Math.max(0, Math.min(100, Math.round(win.used_percent ?? 0)))
-        const rem = Math.max(0, 100 - used)
-        const resetAt = win.reset_at ? new Date(win.reset_at * 1000).toISOString() : undefined
+        // `used_percent` may be renamed or a window may be present without data.
+        // Missing/non-numeric values are "unknown" — never a synthesized 0% used.
+        const rawUsed = parseFinite(win.used_percent)
+        const hasUsed = rawUsed !== undefined
+        const used = hasUsed ? clampPercent(rawUsed!) : undefined
+        const rem = used !== undefined ? 100 - used : undefined
+        const resetAt = normalizeResetAt(win.reset_at)
         const isWeekly = win.limit_window_seconds ? win.limit_window_seconds >= 86400 * 3 : isWeeklyFallback
         const label = isWeekly ? 'Weekly Limit' : (win.limit_window_seconds && win.limit_window_seconds <= 18000 ? '5-Hour Limit' : defaultLabel)
-        const subtitle = formatQuotaResetText(resetAt, used, isWeekly)
-        return {
+        const subtitle = used !== undefined ? formatQuotaResetText(resetAt, used, isWeekly) : '额度状态未知'
+        const window: MetricWindow = {
           id: winId,
           label,
           subtitle,
-          usedPercent: used,
-          remainingPercent: rem,
+          ...(hasUsed
+            ? { usedPercent: used, remainingPercent: rem, quotaKind: 'usage' as const }
+            : { quotaKind: 'unknown' as const }),
           resetAt,
           barType: 'circle',
           windowKind: isWeekly ? 'weekly' : '5h',
-          rawFraction: win.used_percent !== undefined ? (100 - win.used_percent) / 100 : undefined,
-          status: rem <= 0 ? 'exhausted' : 'active',
+          rawFraction: hasUsed ? (100 - used!) / 100 : undefined,
+          status: !hasUsed ? 'unknown' : (rem! <= 0 ? 'exhausted' : 'active'),
         }
+        return window
       }
 
       const primWin = buildWindow(rateLimit.primary_window, 'codex-5h', '5-Hour Limit', false)
@@ -302,10 +360,30 @@ export class CodexProvider implements IQuotaProvider {
         if (crWin) windows.push(crWin)
       }
 
-      const lowestRem = windows.length > 0 ? Math.min(...windows.map(w => w.remainingPercent)) : 100
+      // Paid credits (A19): an amount, so `balance` semantics — no percentage.
+      const credits = data.credits
+      if (credits && (credits.unlimited === true || credits.has_credits === true || parseFinite(credits.balance) !== undefined)) {
+        const creditsBalance = parseFinite(credits.balance)
+        const creditsWindow: MetricWindow = {
+          id: 'codex-credits',
+          label: 'Codex Credits',
+          subtitle: credits.unlimited === true
+            ? '不限额度（Credits）'
+            : (creditsBalance !== undefined ? `剩余 $${creditsBalance.toFixed(2)}` : 'Credits 状态未知'),
+          quotaKind: 'balance',
+          barType: 'balance',
+          ...(credits.unlimited !== true && creditsBalance !== undefined ? { amountText: `$${creditsBalance.toFixed(2)}` } : {}),
+          status: credits.unlimited === true ? 'active' : (creditsBalance !== undefined && creditsBalance <= 0 ? 'exhausted' : 'active'),
+        }
+        windows.push(creditsWindow)
+      }
+
+      // Only real quota ratios may drive pressure status.
+      const quantified = windows.filter(isQuantified)
+      const lowestRem = quantified.length > 0 ? Math.min(...quantified.map(w => w.remainingPercent)) : undefined
       // Exhaustion is a warning, not a transport failure: `error` stays reserved for
       // unreachable endpoints so alarms never read "额度耗尽" as "凭据失效".
-      const cardStatus = windows.length === 0 ? 'ok' : (lowestRem <= (config.alarmThresholdPercent ?? 15) ? 'warn' : 'ok')
+      const cardStatus = lowestRem !== undefined && lowestRem <= (config.alarmThresholdPercent ?? 15) ? 'warn' : 'ok'
 
       return {
         card: {
@@ -342,7 +420,6 @@ export class CodexProvider implements IQuotaProvider {
           provider: 'codex',
           category: this.category,
           status: 'error',
-          plan: '已连接',
           account: creds.source,
           error: err.message,
           groups: [],

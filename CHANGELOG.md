@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-06
+
 ### Fixed
-- **修复升级后插件同步报错 `loaded without registering "@francescoli/dsh-quota"`**：客户端 bundle 原先把 `const factory` 声明在 classic script 顶层，页面在升级后（HMR 或重复 script）再次执行同一 rev 时会以 `Identifier 'factory' has already been declared` 在解析阶段中断，导致 `__ModuleLoader__` 收不到任何注册。现改为 IIFE 包裹、整体注册一个规范 id，并对重复注册保持惰性（不会再中断插件同步）。
+- **客户端 bundle 重执行崩溃 `loaded without registering "@francescoli/dsh-quota"`**：build 改为 esbuild 生成 classic-script + IIFE 单模块产物，重复执行幂等、只注册一个规范 id；宿主把插件拼成同一批 classic script，因此单个包的语法错误会拖垮整批，本次同时加了产物闸门（可解析 / 单 id / 二次执行安全 / 工厂可物化）。
+- **发布流程没有测试门禁**：CI 现在执行 `npm ci` → `npm run build` → 构建可复现校验 → 全量测试 → 版本元数据校验；`npm test` 从 27 条字符串断言扩展到 141 条（含 vm 双执行、路由守卫、16 家 provider fixture、core 存储/并发）。
+- **版本号单一来源**：`PLUGIN_VERSION` 收敛到 `src/core/types.ts`，host/client 入口与 UI 版本标签引用它，`package.json` 由发布流程校验一致。
+- **数据真实性（消灭假 0% / 假 100%）**：`MetricWindow` 增加 `quotaKind: usage | balance | liveness | unknown`，百分比改为可选，新增 `isQuantified()`；`openai_billing` 不再恒 100%（真实解析 costs/usage，拿不到即 `unknown`），`custom_api` 分母改用原始总额且 0 余额显示 0%，Antigravity `remainingFraction:null` 不再被当成 0% 耗尽，Codex/Cursor/OpenCode-Go 缺字段不再按满额显示。
+- **余额类不再编造百分比**：DeepSeek / Kimi / SiliconFlow 改为 `quotaKind:'balance'` + `amountText`（DeepSeek 支持 CNY/USD 多币种），HUD、Agent 摘要与消耗速率改读金额。
+- **连通性类不再伪装额度**：GLM / MiniMax / Qwen / Volcengine / Copilot / Claude 标记为 `liveness`，不再输出 0%/100% 或「额度充足」；Copilot 必须拿到 Copilot token 且 sku 匹配，Claude 的速率头改为「速率余量」原始计数。
+- **代理模式未透传**：16 家 provider 全部把 `config.proxyMode` 作为第 5 参数传给 `fetchWithProxy`，`proxy-required` 不再被静默降级为直连。
+- **历史文件写放大**：`quota-history.json` 改为 append-only JSONL（`quota-history.jsonl`），单 key 2000 点 / 30 天裁剪真正生效，写入移出请求路径（异步 append 合并），损坏文件隔离为 `.corrupt-<ts>`，compaction 前保留 `.bak`；旧 JSON 自动迁移。
+- **并发与超时**：整轮 + 实例双层 single-flight，`force` 5 秒限流，`AbortSignal` 全链路透传到 provider，失败卡指数退避 60s→10min，配置保存后的后台刷新不再产生未处理拒绝。
+- **客户端正确性**：单卡刷新补转义（远端 name/account/error 不再直达 innerHTML）；`emit()` 逐监听器容错；请求统一 8s 超时与中文错误；滚动位置与输入焦点在轮询重建时保留；头显示「最后更新」与失败横幅；标签页隐藏时暂停轮询与 HUD 轮播；HUD 拖拽在窗口外松手不再卡死。
+- **OAuth**：Codex 回调 `redirect_uri` 与实际监听端口一致（1455 被占用时明确报错而非静默换端口），登录流程 single-flight；刷新后的 token 立即持久化，重启不再使用过期 token；写 `~/.codex/auth.json` 前自动备份并合并字段。
+- **密钥面收口**：`getSafeConfig` 的掩码字段清单补齐 `sessionKey`，掩码不再回显真实首尾字符；`baseUrl`/`provider` 变更时不再回填旧密钥。
+
+### Added
+- **官方 slots 接入**：dashboard 作为 `main` 主面板（key `quota`），侧边栏 `sidebar.panellist` 图标、`sidebar.toggle.badge` 告警角标、`sidebar.footer.action` 快捷入口；宿主不提供 slots 时回退到原有 DOM 挂载。
+- **i18n**：注册 `dsh-quota` 命名空间（zh/en），壳层文案（入口/面板/角标/快捷入口）随宿主语言切换。
+- **desktop 适配**：客户端新增 `resolveApiBase()`（`__DSH_TRANSPORT__.streamBaseUrl ?? document.baseURI`），不再硬编码 `/api/dsh-quota/*` 绝对路径；README 增加 Desktop profile 安装指引。
+- **安全加固**：插件 API 统一守卫（`X-DSH-Quota` 头 + 回环 Host + 同源 Origin/Sec-Fetch-Site + 写入仅 JSON），`custom_api`/`openai_billing` 的 baseUrl 经 `assertSafeRemoteUrl` 校验（拒绝非 http(s)、云元数据与链路本地地址，允许本机/内网中转），`/history` 参数收敛并对超长序列降采样。
+- **构建**：host/client 产物均输出 source map（宿主会读取 `client.js.map`），`scripts/validate-release.mjs` 提供跨平台发布校验（不再依赖 PowerShell）。
+
+### Changed
+- `npm test` 现为 `node tests/run.mjs && node --test tests/*.test.mjs`；`prepack` 仍会重建产物。
+- 新增 `engines.dsh` 与 `engines.node` 声明。
+- 移除废弃文件 `test-run.ts`。
+
+### Security
+- 修复跨站页面可通过 `text/plain` + JSON body 绕过 preflight 改写配置（含 `httpProxy`）的链路；修复未校验 `baseUrl` 造成的盲 SSRF。
 
 ## [0.4.0] - 2026-11-03
 

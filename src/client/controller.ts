@@ -3,6 +3,22 @@ import { getRefreshIntervalSeconds, escapeCardText } from './api.ts'
 
 export type Listener = () => void
 
+/** Turn any thrown value into a sentence the header can display. */
+export function formatErrorForUi(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  if (typeof err === 'string' && err.trim() !== '') return err
+  return '未知错误'
+}
+
+/**
+ * Stable identity of a notified alarm. Includes the window so the same alarm can
+ * fire again after it disappeared and came back, and so the key does not grow a
+ * new variant every time the message embeds a changing number.
+ */
+export function alarmNotificationKey(alarm: Pick<QuotaAlarm, 'instanceId' | 'level' | 'windowId'>): string {
+  return `${alarm.instanceId}_${alarm.level}_${alarm.windowId ?? ''}`
+}
+
 export const DEFAULT_PROVIDER_ORDER = [
   'deepseek',
   'antigravity',
@@ -61,6 +77,8 @@ export class QuotaController {
   private onVisibilityChangeHandler?: () => void
   private onWindowFocusHandler?: () => void
   private isDestroyed = false
+  /** The refresh currently on the wire; concurrent refresh() callers join it. */
+  private inflight: Promise<void> | null = null
 
   constructor(api: QuotaClientApi) {
     this.api = api
@@ -80,9 +98,17 @@ export class QuotaController {
     return getRefreshIntervalSeconds(this.config)
   }
 
+  private isDocumentHidden(): boolean {
+    if (typeof document === 'undefined') return false
+    return document.hidden === true || document.visibilityState === 'hidden'
+  }
+
   startPolling(): void {
     if (this.isDestroyed) return
     this.stopPolling()
+    // No timer while the tab/window is hidden: the visibilitychange handler
+    // restarts it and catches up if the data went stale meanwhile.
+    if (this.isDocumentHidden()) return
     const intervalSec = this.getRefreshIntervalSec()
     const intervalMs = Math.max(5 * 1000, intervalSec * 1000)
 
@@ -91,9 +117,8 @@ export class QuotaController {
         this.stopPolling()
         return
       }
-      if (!this.loading) {
-        void this.refresh(false, true)
-      }
+      if (this.isDocumentHidden()) return
+      void this.refresh(false, true)
     }, intervalMs)
   }
 
@@ -104,6 +129,16 @@ export class QuotaController {
     }
   }
 
+  /** Silent catch-up when data is older than the interval (capped at 60s). */
+  private refreshIfStale(): void {
+    if (this.isDestroyed) return
+    const intervalSec = this.getRefreshIntervalSec()
+    const staleThresholdMs = Math.min(60 * 1000, intervalSec * 1000)
+    if (Date.now() - this.lastUpdated >= staleThresholdMs) {
+      void this.refresh(false, true)
+    }
+  }
+
   private setupWindowListeners(): void {
     if (this.isDestroyed) return
     if (typeof document === 'undefined' || typeof window === 'undefined') return
@@ -111,26 +146,30 @@ export class QuotaController {
 
     this.onVisibilityChangeHandler = () => {
       if (this.isDestroyed) return
-      if (document.visibilityState === 'visible') {
-        const intervalSec = this.getRefreshIntervalSec()
-        const staleThresholdMs = Math.min(60 * 1000, intervalSec * 1000)
-        if (Date.now() - this.lastUpdated >= staleThresholdMs) {
-          void this.refresh(false, true)
-        }
+      if (this.isDocumentHidden()) {
+        this.stopPolling()
+        return
       }
+      this.startPolling()
+      this.refreshIfStale()
     }
 
     this.onWindowFocusHandler = () => {
       if (this.isDestroyed) return
-      const intervalSec = this.getRefreshIntervalSec()
-      const staleThresholdMs = Math.min(60 * 1000, intervalSec * 1000)
-      if (Date.now() - this.lastUpdated >= staleThresholdMs) {
-        void this.refresh(false, true)
-      }
+      if (this.isDocumentHidden()) return
+      this.refreshIfStale()
     }
 
     document.addEventListener('visibilitychange', this.onVisibilityChangeHandler)
     window.addEventListener('focus', this.onWindowFocusHandler)
+  }
+
+  /** Drop remembered alarms that are no longer active so the set stays bounded. */
+  private pruneNotifiedAlarms(alarms: QuotaAlarm[]): void {
+    const activeKeys = new Set(alarms.map(alarm => alarmNotificationKey(alarm)))
+    for (const key of Array.from(this.notifiedAlarmIds)) {
+      if (!activeKeys.has(key)) this.notifiedAlarmIds.delete(key)
+    }
   }
 
   private triggerDesktopNotification(alarms: QuotaAlarm[]): void {
@@ -138,7 +177,7 @@ export class QuotaController {
     if (typeof window === 'undefined' || !('Notification' in window)) return
     if (this.config?.enableNotification === false) return
 
-    const criticalAlarms = alarms.filter(a => a.level === 'critical' && !this.notifiedAlarmIds.has(`${a.instanceId}_${a.message}`))
+    const criticalAlarms = alarms.filter(a => a.level === 'critical' && !this.notifiedAlarmIds.has(alarmNotificationKey(a)))
     if (criticalAlarms.length === 0) return
 
     const send = () => {
@@ -148,7 +187,7 @@ export class QuotaController {
             body: a.message,
             icon: '/favicon.ico',
           })
-          this.notifiedAlarmIds.add(`${a.instanceId}_${a.message}`)
+          this.notifiedAlarmIds.add(alarmNotificationKey(a))
         } catch {}
       }
     }
@@ -164,6 +203,7 @@ export class QuotaController {
 
   destroy(): void {
     this.isDestroyed = true
+    this.inflight = null
     this.stopPolling()
     if (typeof document !== 'undefined' && this.onVisibilityChangeHandler) {
       document.removeEventListener('visibilitychange', this.onVisibilityChangeHandler)
@@ -182,7 +222,15 @@ export class QuotaController {
   }
 
   private emit(): void {
-    for (const l of this.listeners) l()
+    for (const listener of Array.from(this.listeners)) {
+      try {
+        listener()
+      } catch (err) {
+        // One broken consumer (e.g. a render path hitting an unexpected card)
+        // must never stop the remaining listeners or the polling loop.
+        console.error('[dsh-quota] listener failed:', err)
+      }
+    }
   }
 
   getSnapshot(): PanelSnapshot {
@@ -275,7 +323,22 @@ export class QuotaController {
     this.emit()
   }
 
+  /**
+   * Refresh cards, merging concurrent calls (polling + focus + manual refresh)
+   * onto one in-flight request. `silent` only hides the loading indicator; a
+   * failure is always recorded so the header can show "last updated + failed".
+   */
   async refresh(force = false, silent = false): Promise<void> {
+    if (this.inflight !== null) return this.inflight
+    let tracked: Promise<void>
+    tracked = this.performRefresh(force, silent).finally(() => {
+      if (this.inflight === tracked) this.inflight = null
+    })
+    this.inflight = tracked
+    return tracked
+  }
+
+  private async performRefresh(force: boolean, silent: boolean): Promise<void> {
     if (!silent) {
       this.loading = true
       this.error = undefined
@@ -288,15 +351,16 @@ export class QuotaController {
       // Alarms reach the OS notification body as plain text; escaping here would print
       // entities. Any future HTML surface must escape at its own render site.
       this.alarms = data.alarms || []
-      this.lastUpdated = data.lastUpdated
+      if (typeof data.lastUpdated === 'number' && Number.isFinite(data.lastUpdated)) {
+        this.lastUpdated = data.lastUpdated
+      }
+      this.error = undefined
+      this.pruneNotifiedAlarms(this.alarms)
       this.triggerDesktopNotification(this.alarms)
-      if (silent) {
-        this.error = undefined
-      }
     } catch (err: any) {
-      if (!silent) {
-        this.error = err.message
-      }
+      // Silent polling failures must keep `error` and `lastUpdated` so the panel
+      // can render "last updated hh:mm · refresh failed" instead of stale-as-fresh.
+      this.error = formatErrorForUi(err)
     } finally {
       if (!silent) {
         this.loading = false
@@ -309,16 +373,15 @@ export class QuotaController {
     this.refreshingProviders.add(providerOrId)
     this.emit()
     try {
-      const updatedCard = await this.api.refreshSingle(providerOrId)
-      if (updatedCard) {
-        const idx = this.cards.findIndex(c => c.id === providerOrId || c.provider === providerOrId)
-        if (idx !== -1) this.cards[idx] = updatedCard
-        const allIdx = this.allCards.findIndex(c => c.id === providerOrId || c.provider === providerOrId)
-        if (allIdx !== -1) this.allCards[allIdx] = updatedCard
-        this.lastUpdated = Date.now()
-      }
+      const updatedCard = escapeCardText(await this.api.refreshSingle(providerOrId))
+      const idx = this.cards.findIndex(c => c.id === providerOrId || c.provider === providerOrId)
+      if (idx !== -1) this.cards[idx] = updatedCard
+      const allIdx = this.allCards.findIndex(c => c.id === providerOrId || c.provider === providerOrId)
+      if (allIdx !== -1) this.allCards[allIdx] = updatedCard
+      this.lastUpdated = Date.now()
+      this.error = undefined
     } catch (err: any) {
-      this.error = err.message
+      this.error = formatErrorForUi(err)
     } finally {
       this.refreshingProviders.delete(providerOrId)
       this.emit()
@@ -354,7 +417,10 @@ export class QuotaController {
       this.config = await this.api.getConfig()
       this.emit()
       this.startPolling()
-    } catch {}
+    } catch (err: any) {
+      this.error = formatErrorForUi(err)
+      this.emit()
+    }
   }
 
   async saveConfig(cfg: QuotaConfig): Promise<void> {
@@ -368,7 +434,7 @@ export class QuotaController {
       await this.refresh(true)
     } catch (err: any) {
       this.config = previousConfig
-      this.error = err.message
+      this.error = formatErrorForUi(err)
     } finally {
       this.loading = false
       this.emit()
