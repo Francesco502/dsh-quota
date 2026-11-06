@@ -85,4 +85,6 @@ npm pack --ignore-scripts     # inspect the already built distribution
 
 No runtime dependencies, CDN assets or install-time scripts are introduced. Do not add telemetry, credential scans or an independently configured network stack to implement a quota source. Existing provider/model inference remains owned by Harness.
 
+The client build checks the generated bundle's classic-script syntax before writing it. Client regressions load that bundle through the module registration facade and materialize the plugin, alongside the date and duration tests.
+
 [Apache-2.0](./LICENSE)

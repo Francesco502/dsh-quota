@@ -614,7 +614,9 @@ test('reports missing, expired, non-OAuth and unsupported credentials honestly',
   const empty = await emptyMonitor.snapshot({ refresh: true })
   assert.equal(accountById(empty, 'codex').status, 'unavailable')
   assert.equal(accountById(empty, 'claude').status, 'unavailable')
-  assert.equal(accountById(empty, 'deepseek-account').status, 'unavailable')
+  // A route never signed in to produces no card: an "Unavailable" row for a
+  // deployment that only uses an API key is noise.
+  assert.equal(empty.accounts.some(account => account.id === 'deepseek-account'), false)
   assert.equal(accountById(empty, 'deepseek-api').status, 'unavailable')
   const emptyUnsupported = empty.accounts.filter(candidate => candidate.status === 'unsupported')
   assert.deepEqual(emptyUnsupported.map(account => account.id), ['cursor', 'copilot'])
@@ -633,7 +635,8 @@ test('reports missing, expired, non-OAuth and unsupported credentials honestly',
     { fetch: fakeFetch(standardHandlers()).fetch, now: () => T0 },
   )
   const noLlm = await noLlmMonitor.snapshot({ refresh: true })
-  assert.equal(noLlm.accounts.length, 4, 'no live provider list means no unrelated unsupported rows')
+  // One fewer than before: the signed-out DeepSeek account no longer produces a card.
+  assert.equal(noLlm.accounts.length, 3, 'no live provider list means no unrelated unsupported rows')
   assert.equal(noLlm.accounts.filter(candidate => candidate.status === 'unsupported').length, 0)
 
   let fetchedExpired = 0
