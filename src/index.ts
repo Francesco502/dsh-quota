@@ -1,116 +1,112 @@
+/** Harness-native, credential-safe quota monitoring and usage accounting. */
+import { createUsageTracker } from './harness/usage.ts'
+import type { ExternalUsageOptions, ExternalUsageReceipt, ExternalUsageResult } from './harness/usage.ts'
+import { createQuotaMonitor } from './harness/quotas.ts'
+import { registerQuotaRoutes, parseUsageQuery, usageForTool } from './harness/api.ts'
+
+export const VERSION = '0.5.0-secure.1'
+// No raw webServer; unavailable Harness services fail activation rather than
+// falling back to unguarded routes or independent credential files.
+export const inject = ['connection', 'llm', 'credentials', 'sessionQuery', 'sessionProjections', 'storageDomain', 'tools']
+
 /**
- * Host loader entry for dsh-quota plugin.
- * @package dsh-quota
- * @version 0.4.0
+ * Shared read interface used by the UI/tool and dependent routing plugins. The
+ * only write is idempotent receipt ingestion for calls the Harness did not
+ * observe; quotas and credentials stay read-only.
  */
-import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-host-webserver'
-import { QuotaManager } from './core/manager.ts'
-import { makeQuotaRoutes } from './routes.ts'
-
-export const VERSION = '0.4.0'
-export const inject = ['systemPrompt', 'webServer']
-
-const GUIDANCE = '本机已安装 dsh-quota 插件（DSH AI 额度与用量监控 v0.4.0）：侧边栏「额度监控」入口。能力：集中监控并展示 DeepSeek、Cursor、Codex、Google Antigravity、GitHub Copilot、OpenAI Billing、Claude、Kimi、智谱 GLM、MiniMax、通义千问、火山方舟、硅基流动 (SiliconFlow)、OpenRouter、OpenCode-Go 及 OneAPI 中转服务的实时剩余额度、用量及到期重置周期；支持 Gemini 4 Argon 独立周额度、7 天时序趋势 Sparkline、消耗速率计算、一键全部测活与多账号中转管理。在长程编码任务启动前或用户询问额度/模型选择时，可调用 get_quota_status 自动获取各模型实时余量与智能路由推荐。'
-
-export function apply(ctx: Context): void {
-  const manager = new QuotaManager()
-
-  // Register routes
-  ctx.effect(() => {
-    const routes = makeQuotaRoutes(manager)
-    const disposers: Array<() => void> = []
-    for (const r of routes) {
-      disposers.push(ctx.webServer.register(r))
-    }
-    return () => {
-      for (const d of disposers) d()
-      manager.oauthManager.dispose()
-    }
-  }, 'quota: routes')
-
-  // Register system prompt guidance
-  ctx.effect(() => {
-    return ctx.systemPrompt.section({
-      name: 'plugin:quota-monitor',
-      order: 210,
-      text: GUIDANCE,
-    })
-  }, 'quota: system prompt')
-
-  // Register Agent Tool get_quota_status (compatible with DSH 0.1.2+ ctx.tools and legacy ctx.agent)
-  try {
-    const registerTool = (targetTools: any) => {
-      if (!targetTools) return
-      if (typeof targetTools.register === 'function') {
-        return targetTools.register({
-          name: 'get_quota_status',
-          description: '查询当前配置的所有 AI 服务的实时剩余额度、余额、告警状态以及智能模型推荐路由。',
-          parameters: {
-            type: 'object',
-            properties: {
-              provider: {
-                type: 'string',
-                description: '可选：指定查询的 Provider 名称或实例 ID（如 deepseek, cursor, antigravity, kimi, glm, qwen）',
-              },
-              forceRefresh: {
-                type: 'boolean',
-                description: '是否强制从各官方 API 重新拉取最新数据（默认 false 使用缓存）',
-              },
-            },
-          },
-          output: {
-            schema: { type: 'string' },
-            render(_args: any, value: any) {
-              return [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }]
-            },
-          },
-          execute: async (args: { provider?: string; forceRefresh?: boolean }, exec?: any) => {
-            if (exec?.signal?.aborted) {
-              throw new Error('Tool execution aborted')
-            }
-            const summary = await manager.getAgentQuotaSummary(args?.provider, args?.forceRefresh)
-            return JSON.stringify(summary, null, 2)
-          },
-        })
-      }
-      if (typeof targetTools.registerTool === 'function') {
-        return targetTools.registerTool({
-          name: 'get_quota_status',
-          description: '查询当前配置的所有 AI 服务的实时剩余额度、余额、告警状态以及智能模型推荐路由。',
-          parameters: {
-            type: 'object',
-            properties: {
-              provider: {
-                type: 'string',
-                description: '可选：指定查询的 Provider 名称或实例 ID（如 deepseek, cursor, antigravity, kimi, glm, qwen）',
-              },
-              forceRefresh: {
-                type: 'boolean',
-                description: '是否强制从各官方 API 重新拉取最新数据（默认 false 使用缓存）',
-              },
-            },
-          },
-          handler: async (args: { provider?: string; forceRefresh?: boolean }, exec?: any) => {
-            if (exec?.signal?.aborted) {
-              throw new Error('Tool execution aborted')
-            }
-            return manager.getAgentQuotaSummary(args.provider, args.forceRefresh)
-          },
-        })
-      }
-    }
-
-    if ((ctx as any).tools) {
-      ctx.effect(() => registerTool((ctx as any).tools), 'quota: agent tool')
-    } else if (typeof ctx.inject === 'function') {
-      ctx.inject(['tools'], (scoped: any) => {
-        scoped.effect(() => registerTool(scoped.tools), 'quota: agent tool')
+export function createMonitorService(usage: any, quotas: any) {
+  const closed = new AbortController()
+  return {
+    version: 1,
+    usage(query: Record<string, unknown> = {}) { return usage.snapshot(parseUsageQuery(query)) },
+    accounts(options: { refresh?: boolean; signal?: AbortSignal } = {}) {
+      return quotas.snapshot({ ...options, signal: options.signal ? AbortSignal.any([options.signal, closed.signal]) : closed.signal })
+    },
+    /**
+     * Record one direct model call that bypassed `ctx.llm` (Jev, Groq, GLM).
+     * A duplicate id waits for the accepted commit and reports its durability,
+     * so a caller can treat `persisted: true` as the acknowledgement.
+     * @param receipt - caller-stable id, route, task, time, and optional counts.
+     * @param options - caller cancellation; disposal also aborts pending ingestion.
+     * @returns the ingestion outcome.
+     */
+    recordExternalUsage(receipt: ExternalUsageReceipt, options: ExternalUsageOptions = {}): Promise<ExternalUsageResult> {
+      return usage.recordExternalUsage(receipt, {
+        signal: options.signal ? AbortSignal.any([options.signal, closed.signal]) : closed.signal,
       })
-    } else if ((ctx as any).agent) {
-      ctx.effect(() => registerTool((ctx as any).agent), 'quota: agent tool')
+    },
+    async snapshot(query: Record<string, unknown> = {}, options: { signal?: AbortSignal } = {}) {
+      const valid = parseUsageQuery(query)
+      const [accountState, usageState] = await Promise.all([this.accounts(options), usage.snapshot(valid)])
+      return { schemaVersion: 1, generatedAt: Date.now(), accountState, usage: usageState }
+    },
+    async dispose() { closed.abort(); await Promise.allSettled([usage.dispose(), quotas.dispose()]) },
+  }
+}
+
+export async function apply(ctx: any) {
+  const usage = createUsageTracker(ctx)
+  // This is the native Host transport: DSH installs its proxy dispatcher and
+  // inspector around global fetch. Do not probe a nonexistent ctx.fetch service.
+  const quotas = createQuotaMonitor(ctx, { fetch: (input, init) => globalThis.fetch(input, init) })
+  const monitor = createMonitorService(usage, quotas)
+  await ctx.effect(async () => {
+    const disposers: Array<() => unknown> = []
+    try {
+      const stop = await usage.start()
+      if (typeof stop === 'function') disposers.push(stop)
+      disposers.push(ctx.reflect.provide('quotaMonitor', monitor))
+      disposers.push(registerQuotaRoutes(ctx, monitor))
+      disposers.push(ctx.tools.register({
+        name: 'get_quota_status',
+        deferLoading: true,
+        description: 'Read account quota/balance or provider-reported Harness token usage by model, provider, session task, hour and day. Unknown quotas remain unknown; does not change models or credentials.',
+        parameters: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            action: { type: 'string', enum: ['accounts', 'usage', 'snapshot', 'diagnostics'], description: 'Default snapshot. accounts reads provider limits; usage reads local token accounting only; diagnostics reads plugin/client revision metadata without account access.' },
+            from: { type: 'integer', description: 'Inclusive epoch milliseconds. Defaults to seven days before to; maximum range 366 days.' },
+            to: { type: 'integer', description: 'Exclusive epoch milliseconds; defaults to now.' },
+            sessionId: { type: 'string', description: 'Optional exact task session; include descendants by default. Omit for all sessions.' },
+            includeChildren: { type: 'boolean', description: 'Include task subagent sessions; default true.' },
+            timeZone: { type: 'string', description: 'IANA timezone for hour/day buckets; default UTC.' },
+            provider: { type: 'string', description: 'Optional exact Harness provider id for token accounting.' },
+            model: { type: 'string', description: 'Optional exact model id for token accounting.' },
+            groupBy: { type: 'string', enum: ['model', 'provider', 'task', 'session', 'rootSession', 'hour', 'day'], description: 'Detail dimension; default model. task means request purpose; rootSession means a task including subagents.' },
+            limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Maximum detail rows, 1–100; default 20. Totals are never truncated.' },
+          },
+        },
+        output: { schema: { type: 'object', additionalProperties: true }, render(_args: unknown, value: unknown) { return [{ type: 'text', text: JSON.stringify(value) }] } },
+        isConcurrencySafe: () => true,
+        async execute(args: any, exec: any) {
+          exec.signal.throwIfAborted()
+          const { action = 'snapshot', groupBy = 'model', limit = 20, ...query } = args ?? {}
+          if (!['accounts', 'usage', 'snapshot', 'diagnostics'].includes(action)) throw new Error('Unknown quota action')
+          if (action === 'diagnostics') {
+            const modules = ctx.get('clientModules')
+            const entry = modules?.graph().entries.find((item: any) => item.id === '@francescoli/dsh-quota')
+            return { pluginVersion: VERSION, schemaVersion: monitor.version, clientAdvertised: !!entry,
+              ...(entry ? { clientRevision: entry.rev, clientDependencies: entry.inject ?? [] } : {}) }
+          }
+          // Validate independently of the tool transport, including accounts actions.
+          parseUsageQuery(query)
+          if (action === 'accounts') return monitor.accounts({ signal: exec.signal })
+          if (action === 'usage') return usageForTool(await monitor.usage(query), groupBy, limit)
+          const result = await monitor.snapshot(query, { signal: exec.signal })
+          return { ...result, usage: usageForTool(result.usage, groupBy, limit) }
+        },
+      }))
+      // Publish only an already-built Client artifact. This does not start a
+      // watcher/server or promise that source edits build themselves.
+      ctx.get('clientModules')?.rebuilt('@francescoli/dsh-quota')
+    } catch (error) {
+      for (const dispose of disposers.reverse()) await dispose()
+      await monitor.dispose()
+      throw error
     }
-  } catch {}
+    return async () => {
+      await monitor.dispose()
+      for (const dispose of disposers.reverse()) await dispose()
+    }
+  }, 'quota: native accounting, service and owner-only API')
 }

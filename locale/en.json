@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Usage and quotas",
+    "description": "Provider-reported Harness token accounting by task, hour, day, model and provider, with official account quota and balance monitoring. No model routing or credential editing."
+  }
+}
