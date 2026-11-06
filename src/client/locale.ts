@@ -5,6 +5,8 @@
  * that appear in shell chrome are translated here; the dashboard body keeps its
  * existing copy until the full string extraction lands.
  */
+import { serviceOf } from './services.ts'
+
 export const LOCALE_NS = 'dsh-quota'
 
 const DICT = {
@@ -45,7 +47,7 @@ type LocaleService = {
  * without the locale service (or with an incompatible shape) keeps English.
  */
 export function registerQuotaLocale(ctx: any): QuotaTranslate {
-  const locale: LocaleService | undefined = ctx?.locale
+  const locale: LocaleService | undefined = serviceOf(ctx, 'locale')
   if (locale === undefined) return fallback
 
   try {

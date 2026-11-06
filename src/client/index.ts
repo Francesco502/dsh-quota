@@ -1,11 +1,11 @@
 /**
  * Client entry for the dsh-quota Web UI.
  *
- * Preferred path (current hosts): official slots — the dashboard is a real main
- * panel, the entry is a sidebar panel row, the alert dot lives on the collapsed
- * rail, and a footer shortcut jumps to the panel. If the host does not expose
- * `ctx.slots` (older builds or a missing React seat), the plugin falls back to
- * the previous DOM-injection mount so it keeps working.
+ * Preferred path: official slots provide the sidebar footer shortcut and the
+ * collapsed-rail alert badge, while the dashboard itself keeps the proven
+ * overlay mount (it renders into the conversation column and takes over the
+ * main area when opened). Hosts without the slots service fall back to the
+ * previous DOM-injected sidebar entry.
  *
  * @package dsh-quota
  * @version 0.4.1
@@ -18,9 +18,11 @@ import { mountQuotaHud } from './hud.ts'
 import { PLUGIN_VERSION } from '../core/types.ts'
 import { registerQuotaLocale } from './locale.ts'
 import { PANEL_ID, registerQuotaSlots } from './slots.ts'
+import { serviceOf } from './services.ts'
 
 export const VERSION = PLUGIN_VERSION
-export const inject: string[] = []
+/** Cordis services the shell surfaces depend on. Declared so the fiber waits for them. */
+export const inject: string[] = ['slots', 'locale']
 
 let applied = false
 
@@ -38,70 +40,82 @@ function loadReact(): any {
   return undefined
 }
 
-function selectPanelFrom(ctx: any): ((id: string) => void) | undefined {
-  const layout = ctx?.layout
-  if (layout === undefined || typeof layout.selectPanel !== 'function') return undefined
-  return (id: string) => layout.selectPanel(id)
+function startController(controller: QuotaController): void {
+  void controller.init().catch((error: unknown) => {
+    console.warn('[dsh-quota] initial load failed:', (error as Error)?.message ?? error)
+  })
 }
 
-function applyWithSlots(ctx: any, react: any, selectPanel: ((id: string) => void) | undefined): void {
+function guardedMount<T>(label: string, mount: () => T): T | undefined {
+  try {
+    return mount()
+  } catch (error) {
+    console.error(`[dsh-quota] ${label} failed:`, error)
+    return undefined
+  }
+}
+
+function applyWithSlots(ctx: any, react: any): void {
   const api = new QuotaClientApi()
   const controller = new QuotaController(api)
   const t = registerQuotaLocale(ctx)
 
-  const disposeSlots = registerQuotaSlots(ctx, { react, controller, t, selectPanel })
-  if (disposeSlots === undefined) {
-    // Registration produced nothing usable — fall through to the legacy mount.
-    applied = false
-    applyLegacy(ctx, api, controller)
-    return
-  }
+  const disposeSlots = registerQuotaSlots(ctx, { react, controller, t })
+  // The dashboard keeps the overlay mount: it is the same renderer users already
+  // run, so the official seats only change how the panel is reached. One broken
+  // mount must not tear down the seats that already registered.
+  const disposePanel = guardedMount('panel mount', () => mountPanel(controller))
+  const disposeHud = guardedMount('HUD mount', () => mountQuotaHud(controller))
+  // A host that exposes slots but rejected every seat still needs an entry point.
+  const disposeLegacyEntry =
+    disposeSlots === undefined ? guardedMount('legacy sidebar entry', () => mountQuotaSidebarEntry(controller)) : undefined
 
-  const disposeHud = mountQuotaHud(controller)
-  void controller.init()
-
-  // The host owns panel selection; only nudge it back when we know the layout
-  // service exists (a footer shortcut implies it does).
-  const closeSubscription = controller.subscribe(() => {
-    if (controller.getSnapshot().panelOpen) return
-    selectPanel?.('conversation')
-  })
+  startController(controller)
 
   const disposeAll = (): void => {
     try {
-      closeSubscription()
+      disposeSlots?.()
+      disposeLegacyEntry?.()
     } catch {
-      /* ignore */
+      /* host teardown races are not our problem */
     }
-    disposeSlots()
+    disposePanel?.()
+    disposeHud?.()
+    controller.destroy()
+    applied = false
+  }
+
+  if (ctx && typeof ctx.effect === 'function') {
+    try {
+      ctx.effect(() => disposeAll, 'quota: client cleanup')
+    } catch (error) {
+      console.warn('[dsh-quota] effect registration failed:', (error as Error)?.message ?? error)
+    }
+  }
+}
+
+function applyLegacy(ctx: any, api: QuotaClientApi, controller: QuotaController): void {
+  applied = true
+  const disposeEntry = mountQuotaSidebarEntry(controller)
+  const disposePanel = mountPanel(controller)
+  const disposeHud = mountQuotaHud(controller)
+
+  startController(controller)
+
+  const disposeAll = (): void => {
+    disposeEntry()
+    disposePanel()
     disposeHud()
     controller.destroy()
     applied = false
   }
 
   if (ctx && typeof ctx.effect === 'function') {
-    ctx.effect(() => disposeAll, 'quota: client cleanup')
-  }
-}
-
-function applyLegacy(ctx: any, api: QuotaClientApi, controller: QuotaController): void {
-  applied = true
-  const d1 = mountQuotaSidebarEntry(controller)
-  const d2 = mountPanel(controller)
-  const d3 = mountQuotaHud(controller)
-
-  void controller.init()
-
-  const disposeAll = (): void => {
-    d1()
-    d2()
-    d3()
-    controller.destroy()
-    applied = false
-  }
-
-  if (ctx && typeof ctx.effect === 'function') {
-    ctx.effect(() => disposeAll, 'quota: client cleanup')
+    try {
+      ctx.effect(() => disposeAll, 'quota: client cleanup')
+    } catch (error) {
+      console.warn('[dsh-quota] effect registration failed:', (error as Error)?.message ?? error)
+    }
   }
 }
 
@@ -109,25 +123,23 @@ export function apply(ctx: any): void {
   if (applied) return
   applied = true
 
-  const react = loadReact()
-  const selectPanel = selectPanelFrom(ctx)
-
-  if (ctx?.slots !== undefined && react !== undefined) {
-    try {
-      applyWithSlots(ctx, react, selectPanel)
-      return
-    } catch (error) {
-      console.error('[dsh-quota] slot mount failed, falling back to DOM mount:', error)
-      applied = false
-    }
-  }
-
   try {
+    const react = loadReact()
+    if (serviceOf(ctx, 'slots') !== undefined && react !== undefined) {
+      try {
+        applyWithSlots(ctx, react)
+        return
+      } catch (error) {
+        console.error('[dsh-quota] slot mount failed, falling back to DOM mount:', error)
+        applied = false
+      }
+    }
+
     const api = new QuotaClientApi()
     applyLegacy(ctx, api, new QuotaController(api))
   } catch (error) {
     applied = false
-    console.error('[dsh-quota] legacy mount failed:', error)
+    console.error('[dsh-quota] client mount failed:', error)
   }
 }
 

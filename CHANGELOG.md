@@ -24,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **密钥面收口**：`getSafeConfig` 的掩码字段清单补齐 `sessionKey`，掩码不再回显真实首尾字符；`baseUrl`/`provider` 变更时不再回填旧密钥。
 
 ### Added
-- **官方 slots 接入**：dashboard 作为 `main` 主面板（key `quota`），侧边栏 `sidebar.panellist` 图标、`sidebar.toggle.badge` 告警角标、`sidebar.footer.action` 快捷入口；宿主不提供 slots 时回退到原有 DOM 挂载。
-- **i18n**：注册 `dsh-quota` 命名空间（zh/en），壳层文案（入口/面板/角标/快捷入口）随宿主语言切换。
+- **官方 slots 接入**：`sidebar.footer.action` 提供侧边栏底部「额度监控」快捷入口、`sidebar.toggle.badge` 提供折叠栏告警角标，壳层文案走 `locale` 命名空间；宿主不提供 slots 时回退到原有 DOM 注入入口。
+  - 说明：`main` 主面板与 `sidebar.panellist` 已评估并放弃——在 0.2.2-rc.1 上注册成功但宿主始终把面板容器保持 `display:none`（`selectPanel` 返回成功、组件已挂载但不显示），发布一个点开空白的入口比保留覆盖层方案更糟，因此内容区继续使用已验证的覆盖层渲染。
+- **i18n**：注册 `dsh-quota` 命名空间（zh/en），壳层文案（底部入口/角标）随宿主语言切换。
 - **desktop 适配**：客户端新增 `resolveApiBase()`（`__DSH_TRANSPORT__.streamBaseUrl ?? document.baseURI`），不再硬编码 `/api/dsh-quota/*` 绝对路径；README 增加 Desktop profile 安装指引。
 - **安全加固**：插件 API 统一守卫（`X-DSH-Quota` 头 + 回环 Host + 同源 Origin/Sec-Fetch-Site + 写入仅 JSON），`custom_api`/`openai_billing` 的 baseUrl 经 `assertSafeRemoteUrl` 校验（拒绝非 http(s)、云元数据与链路本地地址，允许本机/内网中转），`/history` 参数收敛并对超长序列降采样。
 - **构建**：host/client 产物均输出 source map（宿主会读取 `client.js.map`），`scripts/validate-release.mjs` 提供跨平台发布校验（不再依赖 PowerShell）。

@@ -62,7 +62,7 @@
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.6.0",
-    "dsh": ">=0.2.0"
+    "dsh": ">=0.2.2-rc.1"
   },
   "devDependencies": {
     "esbuild": "^0.28.2"

@@ -1,7 +1,11 @@
 /**
- * Slot wiring tests. The host renders these seats, so the contract we pin here is
- * the registration shape: seat names, panel key, ids and the graceful fallback when
- * a host exposes no slots service.
+ * Slot wiring tests. The host renders these seats, so the contract pinned here is
+ * the registration shape: seat names, ids and the graceful fallback when a host
+ * exposes no slots service.
+ *
+ * The dashboard itself keeps the overlay mount (a main-panel seat was evaluated
+ * and rejected: the host kept its container hidden, so a panellist entry would
+ * open a blank area). The seats we ship are the footer shortcut and the badge.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -20,11 +24,18 @@ function fakeReact() {
 function fakeController() {
   return {
     opened: 0,
+    closed: 0,
+    panelOpen: false,
     open() {
       this.opened += 1
+      this.panelOpen = true
+    },
+    close() {
+      this.closed += 1
+      this.panelOpen = false
     },
     getSnapshot() {
-      return { alarms: [] }
+      return { alarms: [], panelOpen: this.panelOpen }
     },
     subscribe() {
       return () => {}
@@ -55,51 +66,47 @@ test('does nothing when the host exposes no slots service', () => {
   assert.equal(dispose, undefined)
 })
 
-test('registers main, panellist, badge and footer on a slots host', () => {
+test('registers the footer shortcut and the alert badge', () => {
   const { slots, registrations } = captureSlots()
   const dispose = registerQuotaSlots(
     { slots },
-    { react: fakeReact(), controller: fakeController(), t: (key) => String(key), selectPanel: () => {} },
+    { react: fakeReact(), controller: fakeController(), t: (key) => String(key) },
   )
 
-  const names = registrations.map((row) => row.spec.name)
-  assert.deepEqual(names, ['main', 'sidebar.panellist', 'sidebar.toggle.badge', 'sidebar.footer.action'])
-
-  const main = registrations.find((row) => row.spec.name === 'main')
-  assert.equal(main.spec.key, PANEL_ID)
-  assert.equal(main.spec.locale, LOCALE_NS)
-
-  const panellist = registrations.find((row) => row.spec.name === 'sidebar.panellist')
-  assert.equal(panellist.spec.id, PANEL_ID)
-  assert.equal(panellist.spec.label(), 'entry')
-
+  assert.deepEqual(
+    registrations.map((row) => row.spec.name),
+    ['sidebar.toggle.badge', 'sidebar.footer.action'],
+  )
+  const footer = registrations.find((row) => row.spec.name === 'sidebar.footer.action')
+  assert.equal(footer.spec.id, 'dsh-quota-footer')
+  assert.equal(footer.spec.locale, LOCALE_NS)
   assert.equal(typeof dispose, 'function')
 })
 
-test('omits the footer shortcut when the layout service is unavailable', () => {
+test('the footer shortcut toggles the overlay panel', () => {
   const { slots, registrations } = captureSlots()
-  registerQuotaSlots({ slots }, { react: fakeReact(), controller: fakeController(), t: (key) => String(key) })
-  assert.ok(!registrations.some((row) => row.spec.name === 'sidebar.footer.action'))
+  const controller = fakeController()
+  registerQuotaSlots({ slots }, { react: fakeReact(), controller, t: (key) => String(key) })
+
+  const footer = registrations.find((row) => row.spec.name === 'sidebar.footer.action').component
+  const tree = footer({ wide: true })
+  tree.props.onClick()
+  assert.equal(controller.opened, 1)
+  tree.props.onClick()
+  assert.equal(controller.closed, 1)
 })
 
-test('the panellist component renders the gauge icon at the requested size', () => {
+test('the footer renders its label when wide and hides it on the rail', () => {
   const { slots, registrations } = captureSlots()
-  registerQuotaSlots(
-    { slots },
-    { react: fakeReact(), controller: fakeController(), t: (key) => String(key), selectPanel: () => {} },
-  )
-  const icon = registrations.find((row) => row.spec.name === 'sidebar.panellist').component
-  const tree = icon({ size: 16, active: true })
-  assert.equal(tree.type, 'svg')
-  assert.equal(tree.props.width, 16)
+  registerQuotaSlots({ slots }, { react: fakeReact(), controller: fakeController(), t: (key) => String(key) })
+  const footer = registrations.find((row) => row.spec.name === 'sidebar.footer.action').component
+  assert.equal(footer({ wide: true }).props['data-wide'], 'true')
+  assert.equal(footer({ wide: false }).props['data-wide'], 'false')
 })
 
 test('the badge renders nothing without alarms', () => {
   const { slots, registrations } = captureSlots()
-  registerQuotaSlots(
-    { slots },
-    { react: fakeReact(), controller: fakeController(), t: (key) => String(key), selectPanel: () => {} },
-  )
+  registerQuotaSlots({ slots }, { react: fakeReact(), controller: fakeController(), t: (key) => String(key) })
   const badge = registrations.find((row) => row.spec.name === 'sidebar.toggle.badge').component
   assert.equal(badge(), null)
 })
@@ -107,11 +114,8 @@ test('the badge renders nothing without alarms', () => {
 test('the badge shows the alarm count when alarms exist', () => {
   const { slots, registrations } = captureSlots()
   const controller = fakeController()
-  controller.getSnapshot = () => ({ alarms: [{}, {}, {}] })
-  registerQuotaSlots(
-    { slots },
-    { react: fakeReact(), controller, t: (key) => String(key), selectPanel: () => {} },
-  )
+  controller.getSnapshot = () => ({ alarms: [{}, {}, {}], panelOpen: false })
+  registerQuotaSlots({ slots }, { react: fakeReact(), controller, t: (key) => String(key) })
   const badge = registrations.find((row) => row.spec.name === 'sidebar.toggle.badge').component
   const tree = badge()
   assert.equal(tree.type, 'span')
@@ -120,12 +124,9 @@ test('the badge shows the alarm count when alarms exist', () => {
 
 test('disposer releases every registration', () => {
   const { slots, disposed } = captureSlots()
-  const dispose = registerQuotaSlots(
-    { slots },
-    { react: fakeReact(), controller: fakeController(), t: (key) => String(key), selectPanel: () => {} },
-  )
+  const dispose = registerQuotaSlots({ slots }, { react: fakeReact(), controller: fakeController(), t: (key) => String(key) })
   dispose()
-  assert.deepEqual(disposed.sort(), ['main', 'sidebar.footer.action', 'sidebar.panellist', 'sidebar.toggle.badge'].sort())
+  assert.deepEqual(disposed.sort(), ['sidebar.footer.action', 'sidebar.toggle.badge'].sort())
 })
 
 test('locale registers both baseline dictionaries and returns a bound translator', () => {

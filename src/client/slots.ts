@@ -16,6 +16,7 @@
 import type { QuotaController } from './controller.ts'
 import { renderQuotaApp } from './view.ts'
 import { LOCALE_NS, type QuotaTranslate } from './locale.ts'
+import { serviceOf } from './services.ts'
 
 export const PANEL_ID = 'quota'
 
@@ -87,7 +88,7 @@ function gaugeIcon(react: any, size: number, active: boolean): any {
 }
 
 export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) | undefined {
-  const slots = ctx?.slots
+  const slots = serviceOf(ctx, 'slots')
   if (!slots || typeof slots.register !== 'function') return undefined
   const { react, controller, t } = wiring
   if (!react || typeof react.createElement !== 'function') return undefined
@@ -99,6 +100,7 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
   const track = (result: unknown): void => {
     if (typeof result === 'function') disposers.push(result as () => void)
   }
+
 
   const register = (name: string, spec: Record<string, any>, component: any): void => {
     const doRegister = () => {
@@ -120,45 +122,6 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
     } catch (error) {
       console.warn(`[dsh-quota] slot "${name}" injection failed:`, (error as Error)?.message ?? error)
     }
-  }
-
-  // ---- main panel -------------------------------------------------------
-  const QuotaPanel = () => {
-    const ref = react.useRef(null)
-    react.useEffect(() => {
-      const host = ref.current
-      if (host === null || host === undefined) return undefined
-      document.documentElement.setAttribute(ACTIVE_ATTR, '')
-      try {
-        controller.open()
-      } catch {
-        /* opening only flips internal state */
-      }
-      let dispose: (() => void) | undefined
-      try {
-        dispose = renderQuotaApp(host, controller)
-      } catch (error) {
-        console.error('[dsh-quota] panel mount failed:', error)
-      }
-      return () => {
-        try {
-          dispose?.()
-        } finally {
-          document.documentElement.removeAttribute(ACTIVE_ATTR)
-        }
-      }
-    }, [])
-    return react.createElement(
-      'div',
-      { className: 'dsh-quota-slot-root' },
-      react.createElement('div', { ref, className: 'dsh-quota-slot-panel' }),
-    )
-  }
-
-  // ---- sidebar icon -----------------------------------------------------
-  const QuotaEntryIcon = (props: { size?: number; active?: boolean }) => {
-    const size = typeof props?.size === 'number' ? props.size : 16
-    return gaugeIcon(react, size, props?.active === true)
   }
 
   // ---- collapsed-rail badge --------------------------------------------
@@ -209,9 +172,11 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
         'aria-label': t('footer.open'),
         onClick: () => {
           try {
-            wiring.selectPanel?.(PANEL_ID)
+            const open = controller.getSnapshot().panelOpen
+            if (open) controller.close()
+            else controller.open()
           } catch (error) {
-            console.warn('[dsh-quota] selectPanel failed:', (error as Error)?.message ?? error)
+            console.warn('[dsh-quota] panel toggle failed:', (error as Error)?.message ?? error)
           }
         },
       },
@@ -220,21 +185,14 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
     )
   }
 
-  register('main', { key: PANEL_ID }, QuotaPanel)
-  register(
-    'sidebar.panellist',
-    { id: PANEL_ID, order: 20, label: () => t('entry') },
-    QuotaEntryIcon,
-  )
   register('sidebar.toggle.badge', {}, QuotaBadge)
-  if (typeof wiring.selectPanel === 'function') {
-    register('sidebar.footer.action', { id: 'dsh-quota-footer', order: 20 }, QuotaFooterAction)
-  }
+  register('sidebar.footer.action', { id: 'dsh-quota-footer', order: 20 }, QuotaFooterAction)
 
-  // `slots.inject` hands back a disposer even when the seat never arrives. Only a
-  // real registration means the host accepted the seat; otherwise the caller must
-  // fall back to the DOM mount.
-  if (registered === 0) return undefined
+  // `slots.inject` may defer the callback until the seat's declaring entry is
+  // ready, so a seat can register after `apply()` returns. Return a working
+  // disposer as soon as the slots service exists; the caller must not interpret
+  // "nothing registered synchronously" as "no seats" and mount a second entry.
+  void registered
   return () => {
     for (const dispose of disposers.reverse()) {
       try {

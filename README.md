@@ -33,7 +33,7 @@
    - 配置文件保存在本地 `~/.dsh/quota-config.json`，密钥拆分到 `quota-secrets.json`（均 `0600`）；
    - 历史数据写入 append-only `~/.dsh/quota-history.jsonl`，30 天/单 key 2000 点自动裁剪与每日 compaction。
 6. **原生 UI 与国际化**：
-   - 通过宿主官方 slots 注册主面板、侧边栏入口、折叠栏告警角标与底部快捷入口（旧宿主自动回退 DOM 挂载）；
+   - 通过宿主官方 slots 注册侧边栏底部快捷入口与折叠栏告警角标（旧宿主自动回退 DOM 挂载）；面板内容沿用覆盖层渲染；
    - 壳层文案支持中英切换（`dsh-quota` locale 命名空间）。
 
 ---
@@ -45,6 +45,7 @@
 - **安全修复**：跨站 CSRF 改写配置（含代理）与 `baseUrl` 盲 SSRF。
 - **性能**：历史文件从每 2 分钟全量重写改为增量追加；`force` 刷新去重与限流。
 - **桌面版**：新增 Desktop profile 安装说明与 API base 自适应。
+- **UI 入口**：侧边栏底部新增「额度监控」快捷入口与告警角标（基于官方 slots）。
 
 ---
 
