@@ -1,19 +1,36 @@
 /**
  * Data structures for Quota tracking & Single Long Card UI
- * @version 0.4.0
+ * @version 0.4.1
  */
 
-export const PLUGIN_VERSION = '0.4.0'
+export const PLUGIN_VERSION = '0.4.1'
 
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
 export type ProxyMode = 'direct' | 'proxy-required' | 'proxy-preferred'
+
+/**
+ * What a window actually measures. This is the single source of truth for whether
+ * a percentage is meaningful:
+ * - `usage`   the upstream reports a real quota ratio (5h/weekly/monthly/rolling);
+ * - `balance` the upstream reports money/credits only; show `amountText`, never a ratio;
+ * - `liveness` only authentication/connectivity was checked; there is no quota data;
+ * - `unknown`  the upstream answered but the quota fields were missing or unparsable.
+ */
+export type QuotaKind = 'usage' | 'balance' | 'liveness' | 'unknown'
 
 export interface MetricWindow {
   id: string
   label: string
   subtitle?: string
-  usedPercent: number
-  remainingPercent: number
+  /**
+   * Percent of the window already consumed. Absent whenever the upstream does not
+   * report a real quota ratio — never synthesize 0 or 100 to fill the gap.
+   */
+  usedPercent?: number
+  /** Percent remaining. Absent under the same rule as `usedPercent`. */
+  remainingPercent?: number
+  /** What this window measures. Omitted on legacy windows; resolve with `windowQuotaKind()`. */
+  quotaKind?: QuotaKind
   resetAt?: string
   barType?: 'circle' | 'line' | 'balance'
   status?: 'active' | 'disabled' | 'unknown' | 'exhausted'
@@ -31,6 +48,30 @@ export interface MetricGroup {
   hasInfoIcon?: boolean
   poolType?: 'gemini' | 'argon' | 'claude_gpt' | 'custom' | 'general'
   windows: MetricWindow[]
+}
+
+/** Resolve a window's declared kind; a legacy window carrying a ratio is `usage`. */
+export function windowQuotaKind(win: MetricWindow): QuotaKind {
+  if (win.quotaKind !== undefined) return win.quotaKind
+  return win.remainingPercent !== undefined ? 'usage' : 'unknown'
+}
+
+/**
+ * True only when the window carries a real quota ratio that may be rendered,
+ * recorded in history, compared against alarms or fed into burn-rate math.
+ * Liveness/balance/unknown windows are never quantified, even if a provider
+ * mistakenly left a percentage on them.
+ */
+export function isQuantified(
+  win: MetricWindow,
+): win is MetricWindow & { usedPercent: number; remainingPercent: number } {
+  if (windowQuotaKind(win) !== 'usage') return false
+  return (
+    typeof win.remainingPercent === 'number' &&
+    Number.isFinite(win.remainingPercent) &&
+    typeof win.usedPercent === 'number' &&
+    Number.isFinite(win.usedPercent)
+  )
 }
 
 export interface QuotaBalanceInfo {
@@ -209,8 +250,16 @@ export interface ProviderResult {
 export interface IQuotaProvider {
   name: string
   category: ProviderCategory
-  fetchCard(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<ProviderResult>
-  testConnection?(config: QuotaConfig, accountConfig?: AccountConfigItem): Promise<TestConnectionResult>
+  fetchCard(
+    config: QuotaConfig,
+    accountConfig?: AccountConfigItem,
+    signal?: AbortSignal,
+  ): Promise<ProviderResult>
+  testConnection?(
+    config: QuotaConfig,
+    accountConfig?: AccountConfigItem,
+    signal?: AbortSignal,
+  ): Promise<TestConnectionResult>
 }
 
 export interface ModelRouteRecommendation {
