@@ -13,6 +13,12 @@ export interface Route {
  *  1. a required custom header — a cross-site page cannot attach it without a
  *     CORS preflight, and this server answers no preflight;
  *  2. loopback Host only — a DNS-rebinding page sends its own hostname here;
+ *
+ * The desktop shell loads its page from `dsh-app://` while calling this server
+ * at `http://127.0.0.1:<port>`, so those requests are cross-origin: the custom
+ * header makes them preflighted and a response without CORS headers surfaces in
+ * the browser as `Failed to fetch`. Both the preflight and the real response
+ * therefore carry CORS headers, scoped to that trusted scheme.
  *  3. same-origin Origin / Sec-Fetch-Site when the browser sends them —
  *     the Electron desktop shell loads the app from `dsh-app://`, which is an
  *     opaque-looking but trusted local origin, so that scheme is allow-listed;
@@ -35,6 +41,17 @@ function isLoopbackHostname(hostname: string): boolean {
 interface GuardFailure {
   status: number
   message: string
+}
+
+/** The Origin to echo for CORS, when the caller is the desktop shell's own scheme. */
+function trustedAppOriginOf(req: any): string | undefined {
+  const origin = req?.headers?.origin
+  if (typeof origin !== 'string' || origin.length === 0 || origin === 'null') return undefined
+  try {
+    return TRUSTED_APP_SCHEMES.has(new URL(origin).protocol) ? origin : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function checkGuard(req: any): GuardFailure | undefined {
@@ -128,6 +145,24 @@ export function makeQuotaRoutes(manager: QuotaManager): Route[] {
     handler: (req: any, res: any) => Promise<void> | void,
   ): ((req: any, res: any) => Promise<void>) => {
     return async (req: any, res: any) => {
+      const appOrigin = trustedAppOriginOf(req)
+      if (appOrigin !== undefined && typeof res?.setHeader === 'function') {
+        res.setHeader('Access-Control-Allow-Origin', appOrigin)
+        res.setHeader('Vary', 'Origin')
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'X-DSH-Quota, Content-Type')
+        res.setHeader('Access-Control-Max-Age', '600')
+      }
+      // The preflight carries no custom header by design, so answer it before the guard.
+      if (req?.method === 'OPTIONS') {
+        if (appOrigin === undefined) {
+          sendJson(res, 403, { ok: false, error: '不接受跨站预检' })
+          return
+        }
+        res.writeHead(204)
+        res.end()
+        return
+      }
       const failure = checkGuard(req)
       if (failure !== undefined) {
         sendJson(res, failure.status, { ok: false, error: failure.message })

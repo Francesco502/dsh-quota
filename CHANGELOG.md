@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-09
+
+### Fixed
+- **修复桌面版额度面板 `Failed to fetch`**：客户端按 `__DSH_TRANSPORT__.streamBaseUrl` 发绝对地址，而桌面外壳页面来自 `dsh-app://`，于是每次请求都是跨源且带自定义头 → 触发预检，宿主又不回 CORS 头，浏览器直接抛 `Failed to fetch`。现在宿主对可信桌面协议回 `Access-Control-Allow-*` 并正确处理 `OPTIONS` 预检；非可信来源的预检依旧拒绝。
+- **修复界面版本号滞后**：`PLUGIN_VERSION` 未随 0.4.2 发布更新，面板仍显示 v0.4.1。
+
 ## [0.4.2] - 2026-11-09
 
 ### Fixed

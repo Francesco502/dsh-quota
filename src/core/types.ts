@@ -3,7 +3,7 @@
  * @version 0.4.1
  */
 
-export const PLUGIN_VERSION = '0.4.1'
+export const PLUGIN_VERSION = '0.4.3'
 
 export type ProviderCategory = 'ide' | 'domestic_llm' | 'official_cloud' | 'custom_api'
 export type ProxyMode = 'direct' | 'proxy-required' | 'proxy-preferred'
