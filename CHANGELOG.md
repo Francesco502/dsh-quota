@@ -24,6 +24,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **密钥面收口**：`getSafeConfig` 的掩码字段清单补齐 `sessionKey`，掩码不再回显真实首尾字符；`baseUrl`/`provider` 变更时不再回填旧密钥。
 
 ### Added
+- **视觉系统（0.4.1 第二遍打磨）**：
+  - 颜色统一走语义变量，保留原有青绿/赭黄/砖红（`#3F7A63` / `#BA8137` / `#B04A46`），深色下用同色系微调；环形轨道改用主题边框色，0% 环清晰可见。
+  - 环形进度从 28px 升级为 32px 并在圆心直接显示百分比；趋势图改为 7 天相对用量柱（无数据时显示「数据积累中」，全零时显示「近 7 天无消耗」，不再伪造虚线）。
+  - 服务卡新增数据来源徽标（官方 / 本地 / 模型 / 余额），错误卡新增内联「重试」与可折叠错误详情。
+  - 汇总卡改为互斥口径：已监控 / 正常 / 告警 / 异常（四项相加等于总数），并显示「较昨日 ±」趋势（本地按日快照）；顶部显示相对更新时间与过期提示。
+  - 首屏加入三张骨架卡片，空态与加载态分离。
+- **响应式**：1024 / 720 / 480 三档断点——汇总卡 4→2 列、头部自动换行并收起按钮文字、卡片标题与域名省略号、分类条横向滚动并带渐隐与箭头、设置表在窄屏转为 label:value 卡片、抽屉与表单同步收窄。
+- **HUD**：服务名 + 指标短标签（余额 / 5h / 周 / 月 / 滚动 / 量），暂停/播放按钮（含触屏），0% 红色脉冲，窄屏贴边展开，键盘 Enter/Space/Esc 与 ARIA 标注。
+- **可访问性**：图标按钮 28×28 触控目标、`aria-label`/`aria-pressed`/`role=status`、统一 `:focus-visible` 描边、`prefers-reduced-motion` 关闭轮播与过渡。
+
+### Changed
+- 主按钮与语义色分离（按钮使用宿主 `button-primary-fill`，绿/黄/红只表达状态）；但状态色最终保留插件原始的低饱和调色板，避免宿主亮色令牌破坏原有观感。
+- 字号收敛到 11/12/13/14/17.5，圆角收敛到 6/8/12，容器间距统一到 4px 节奏。
+- 设置表补充 sticky 表头、行 hover、删除按钮 hover 变红；抽屉按「连接与凭据 / 悬浮球显示」分组，测活结果内联展示（成功绿 + 延迟，失败红 + 原因）。
+
+### Fixed
+- 深色主题下状态文字与环形轨道对比度不足（硬编码色的两套主题总有一边不达标）。
+- 单窗口分组仍显示「收起」，汇总数字口径不自洽，错误卡无法原地重试，HUD 标签被截断成「API 中…」。
+### Added
 - **类型检查接入 `tsc --noEmit`**：`types/dsh-shims.d.ts` 为四个 host 包（cordis / dsh-agent / dsh-system-prompt / dsh-host-webserver）提供最小类型面，`tsconfig.json` 以 strict 模式检查 `src/**`；`npm test` 与 CI/release 门禁都会先跑 `npm run typecheck`。修复了 8 处类型错误：`AbortSignal | null` 合并、`DrawerTarget` 闭包收窄、custom endpoint → `AccountConfigItem` 映射、`flushSync` 可见性、`customNames` 键入等。
 - **官方 slots 接入**：`sidebar.footer.action` 提供侧边栏底部「额度监控」快捷入口、`sidebar.toggle.badge` 提供折叠栏告警角标，壳层文案走 `locale` 命名空间；宿主不提供 slots 时回退到原有 DOM 注入入口。
   - 说明：`main` 主面板与 `sidebar.panellist` 已评估并放弃——在 0.2.2-rc.1 上注册成功但宿主始终把面板容器保持 `display:none`（`selectPanel` 返回成功、组件已挂载但不显示），发布一个点开空白的入口比保留覆盖层方案更糟，因此内容区继续使用已验证的覆盖层渲染。

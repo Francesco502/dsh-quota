@@ -177,10 +177,69 @@ function esc(value: unknown): string {
     .replace(/'/g, '&#39;')
 }
 
+/** Human relative time in Chinese, used for the header freshness line. */
+export function formatRelativeTime(timestamp: number, now: number = Date.now()): string {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return ''
+  const diffMs = now - timestamp
+  if (diffMs < 45 * 1000) return '刚刚'
+  if (diffMs < 60 * 60 * 1000) return `${Math.max(1, Math.round(diffMs / 60000))} 分钟前`
+  if (diffMs < 24 * 60 * 60 * 1000) return `${Math.max(1, Math.round(diffMs / 3600000))} 小时前`
+  return `${Math.max(1, Math.round(diffMs / 86400000))} 天前`
+}
+
+/** One chip describing where the numbers came from (official / local / estimate). */
+function renderProvenanceBadge(card: AuthCardItem): string {
+  const provenance = card.sourceProvenance
+  if (!provenance) return ''
+  const labels: Record<string, string> = {
+    'official-summary': '官方',
+    'model-fallback': '模型',
+    'local-state': '本地',
+    'oauth-api': 'OAuth',
+    'user-balance': '余额',
+  }
+  const label = labels[provenance.method ?? ''] ?? '估算'
+  const parts = [label]
+  if (provenance.host) parts.push(provenance.host)
+  if (provenance.endpoint) parts.push(provenance.endpoint)
+  if (provenance.timestamp) parts.push(new Date(provenance.timestamp).toLocaleString())
+  if (provenance.partial) parts.push('部分数据')
+  return `<span class="quota-provenance" title="${esc(parts.join(' · '))}">${label}</span>`
+}
+
+/** Persist one daily summary snapshot so tomorrow can show a "vs yesterday" delta. */
+function recordDailySummary(summary: { total: number; ok: number; warn: number; error: number }): { total?: number; ok?: number; warn?: number; error?: number } {
+  if (typeof localStorage === 'undefined') return {}
+  const key = 'dsh_quota_summary_daily'
+  const dayKey = (date: Date): string => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  try {
+    const stored = JSON.parse(localStorage.getItem(key) || '{}') as Record<string, any>
+    const today = dayKey(new Date())
+    const yesterday = dayKey(new Date(Date.now() - 86400000))
+    stored[today] = { ...summary, at: Date.now() }
+    const keys = Object.keys(stored).sort()
+    for (const stale of keys.slice(0, Math.max(0, keys.length - 8))) delete stored[stale]
+    localStorage.setItem(key, JSON.stringify(stored))
+    return stored[yesterday] ?? {}
+  } catch {
+    return {}
+  }
+}
+
+/** Small delta line: lower alarms are good, so the colour flips for warn/error. */
+function renderSummaryDelta(current: number, previous: number | undefined, positiveIsBad: boolean): string {
+  if (previous === undefined || !Number.isFinite(previous)) return '<span class="trend-flat">· 较昨日 —</span>'
+  const delta = current - previous
+  if (delta === 0) return '<span class="trend-flat">· 较昨日 持平</span>'
+  const bad = positiveIsBad ? delta > 0 : delta < 0
+  const cls = bad ? 'trend-up' : 'trend-down'
+  return `<span class="${cls}">· 较昨日 ${delta > 0 ? '+' : ''}${delta}</span>`
+}
+
 function getQuotaStatusColor(remainingPercent: number): string {
-  if (remainingPercent <= 15) return '#B04A46'
-  if (remainingPercent <= 35) return '#BA8137'
-  return '#3F7A63'
+  if (remainingPercent <= 15) return 'var(--q-error)'
+  if (remainingPercent <= 35) return 'var(--q-warn)'
+  return 'var(--q-success)'
 }
 
 function renderHelp(text: string): string {
@@ -264,77 +323,55 @@ export function formatClockTime(timestamp: number): string {
 }
 
 function renderCircleProgress(remainingPercent: number): string {
-  const radius = 11
+  const size = 32
+  const stroke = 3
+  const radius = (size - stroke) / 2
   const circumference = 2 * Math.PI * radius
   const clampedRem = Math.max(0, Math.min(100, Math.round(remainingPercent)))
   const offset = circumference - (clampedRem / 100) * circumference
   const color = getQuotaStatusColor(clampedRem)
+  const label = clampedRem <= 0 ? '额度已用尽 0%' : `剩余 ${clampedRem}%`
 
   return `
-    <div style="position: relative; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; flex: none;">
-      <svg width="28" height="28" viewBox="0 0 28 28" shape-rendering="geometricPrecision" style="transform: rotate(-90deg); display: block;">
-        <circle cx="14" cy="14" r="${radius}" stroke="var(--dsw-alias-border-l1, rgba(0,0,0,0.08))" stroke-width="2.5" fill="none"/>
-        <circle cx="14" cy="14" r="${radius}" stroke="${color}" stroke-width="2.5" fill="none"
-          stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" stroke-linecap="round"
-          style="transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;"/>
+    <div class="row-ring${clampedRem <= 0 ? ' is-zero' : ''}${clampedRem >= 100 ? ' is-wide' : ''}" role="img" aria-label="${label}" title="${label}">
+      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" shape-rendering="geometricPrecision" aria-hidden="true">
+        <circle cx="${size / 2}" cy="${size / 2}" r="${radius}" stroke-width="${stroke}" fill="none" style="stroke: var(--q-track);"/>
+        <circle cx="${size / 2}" cy="${size / 2}" r="${radius}" stroke-width="${stroke}" fill="none"
+          style="stroke: ${color}; stroke-dasharray: ${circumference}; stroke-dashoffset: ${offset}; stroke-linecap: round; transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;"/>
       </svg>
+      <span class="row-ring-label" style="color: ${color};">${clampedRem}%</span>
     </div>
   `
 }
 
-function renderSparklineSvg(points?: QuotaSparklinePoint[], currentRem = 100, width = 80, height = 24): string {
-  let finalPoints = points && points.length >= 2 ? points : []
-  if (finalPoints.length < 2) {
-    const now = Date.now()
-    finalPoints = [
-      { t: now - 6 * 86400000, r: 0 },
-      { t: now - 5 * 86400000, r: 0 },
-      { t: now - 4 * 86400000, r: 0 },
-      { t: now - 3 * 86400000, r: 0 },
-      { t: now - 2 * 86400000, r: 0 },
-      { t: now - 86400000, r: 0 },
-      { t: now, r: 0 },
-    ]
+/**
+ * Seven-day relative-usage bars. The series is normalised per window by the
+ * collector, so this is a shape, not money: no line is fabricated before two
+ * samples exist, and each bar carries its own dated tooltip.
+ */
+function renderSparklineSvg(points?: QuotaSparklinePoint[]): string {
+  const valid = Array.isArray(points)
+    ? points.filter((point) => point !== null && point !== undefined && typeof point.r === 'number' && Number.isFinite(point.r))
+    : []
+  if (valid.length < 2) {
+    return `<span class="spark-empty" title="需要至少 2 个采样点才能绘制趋势">数据积累中</span>`
   }
-
-  const padding = 3
-  const drawW = width - padding * 2
-  const drawH = height - padding * 2
-
-  const allZero = finalPoints.every(p => p.r === 0)
-  const strokeColor = allZero ? 'var(--dsw-alias-border-l2, rgba(0,0,0,0.18))' : getQuotaStatusColor(currentRem)
-
-  const coords = finalPoints.map((p, idx) => {
-    const x = padding + (idx / (finalPoints.length - 1)) * drawW
-    const clampedR = Math.max(0, Math.min(100, p.r))
-    const y = allZero
-      ? height - padding - 1
-      : padding + (1 - clampedR / 100) * drawH
-    return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 }
-  })
-
-  const pathD = coords.reduce((acc, pt, idx) => `${acc} ${idx === 0 ? 'M' : 'L'} ${pt.x},${pt.y}`, '')
-  const lastPt = coords[coords.length - 1]!
-  const firstPt = coords[0]!
-  const areaD = `${pathD} L ${lastPt.x},${height - padding} L ${firstPt.x},${height - padding} Z`
-
-  const tooltipText = allZero ? '最近使用量变化 · 近期无消耗 (0使用量)' : '最近使用量变化趋势'
-
-  return `
-    <div title="${tooltipText}" class="quota-sparkline-wrap" style="width: ${width}px; height: ${height}px; display: inline-flex; align-items: center; justify-content: center; flex: none;">
-      <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="overflow: visible; display: block;">
-        ${allZero ? '' : `<path d="${areaD}" fill="${strokeColor}" fill-opacity="0.15" />`}
-        <path d="${pathD}" fill="none" stroke="${strokeColor}" stroke-width="${allZero ? 1.2 : 1.65}" stroke-linecap="round" stroke-linejoin="round" ${allZero ? 'stroke-dasharray="2 3"' : ''} />
-        ${allZero ? '' : coords.map((pt, idx) => {
-          const ptData = finalPoints[idx]!
-          const d = new Date(ptData.t)
-          const dateLabel = `${d.getMonth() + 1}/${d.getDate()}`
-          const pointTip = `${dateLabel} 相对用量: ${ptData.r}%`
-          return `<circle cx="${pt.x}" cy="${pt.y}" r="${idx === coords.length - 1 ? 2.4 : 1.8}" fill="${strokeColor}" fill-opacity="${ptData.r > 0 ? 0.9 : 0.4}"><title>${pointTip}</title></circle>`
-        }).join('')}
-      </svg>
-    </div>
-  `
+  const recent = valid.slice(-7)
+  if (recent.every((point) => Math.round(point.r) <= 0)) {
+    return `<span class="spark-empty" title="近 7 天没有记录到消耗">近 7 天无消耗</span>`
+  }
+  const barLabel = (point: QuotaSparklinePoint): string => {
+    const date = new Date(point.t)
+    const day = `${date.getMonth() + 1}/${date.getDate()}`
+    return `${day} 相对用量 ${Math.round(Math.max(0, Math.min(100, point.r)))}%`
+  }
+  const bars = recent.map((point, index) => {
+    const value = Math.max(0, Math.min(100, point.r))
+    const height = Math.max(2, Math.round((value / 100) * 22))
+    const last = index === recent.length - 1
+    return `<span class="spark-bar${last ? ' is-last' : ''}" style="height: ${height}px;" title="${esc(barLabel(point))}"></span>`
+  }).join('')
+  return `<span class="spark-wrap quota-sparkline-wrap" role="img" aria-label="近 7 天相对用量柱状图" title="近 7 天相对用量（按窗口自身归一化）">${bars}</span>`
 }
 
 function showToast(message: string, type: 'success' | 'error' | 'info' = 'success'): void {
@@ -650,7 +687,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       display: none;
       z-index: 60;
       background: var(--dsw-alias-bg-base, #ffffff);
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
       overflow-y: auto;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -693,7 +730,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     .quota-version-tag {
       font-size: 11px;
       font-weight: 600;
-      color: var(--dsw-alias-brand-primary, #0969da);
+      color: var(--dsw-alias-brand-primary, var(--q-brand));
       background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.04));
       padding: 2px 6px;
       border-radius: 4px;
@@ -712,17 +749,17 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       font-weight: 600;
       border: none;
       background: transparent;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       border-radius: 6px;
       cursor: pointer;
       transition: all 0.16s ease;
     }
     .quota-tab-btn:hover {
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .quota-tab-btn.active {
       background: var(--dsw-alias-bg-base, #ffffff);
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
     }
 
@@ -743,7 +780,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .summary-card-label {
       font-size: 11.5px;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       font-weight: 500;
     }
     .summary-card-val {
@@ -765,7 +802,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       border-radius: 14px;
       border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
       background: transparent;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       cursor: pointer;
       white-space: nowrap;
       transition: all 0.15s ease;
@@ -774,9 +811,9 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.04));
     }
     .category-chip.active {
-      background: #3F7A63;
-      color: #ffffff;
-      border-color: #3F7A63;
+      background: var(--q-success);
+      color: var(--q-on-solid);
+      border-color: var(--q-success);
       font-weight: 600;
     }
 
@@ -806,7 +843,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       border: none;
       font-size: 14px;
       cursor: pointer;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       padding: 2px 4px;
       border-radius: 4px;
       transition: color 0.15s ease;
@@ -850,7 +887,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .row-sub-label {
       font-size: 11.5px;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
     }
     .row-right-metric {
       display: flex;
@@ -874,13 +911,13 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .row-metric-caption {
       font-size: 11px;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       font-weight: 500;
     }
     .quota-kind-badge {
       font-size: 11px;
       font-weight: 600;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.05));
       border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
       border-radius: 999px;
@@ -899,9 +936,9 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       gap: 10px;
       padding: 9px 14px;
       border-radius: 8px;
-      border: 1px solid color-mix(in srgb, #B04A46 35%, transparent);
-      background: color-mix(in srgb, #B04A46 8%, transparent);
-      color: var(--dsw-alias-label-error, #B04A46);
+      border: 1px solid color-mix(in srgb, var(--q-error) 35%, transparent);
+      background: color-mix(in srgb, var(--q-error) 8%, transparent);
+      color: var(--dsw-alias-label-error, var(--q-error));
       font-size: 12.5px;
     }
     .quota-error-banner .quota-error-text {
@@ -919,7 +956,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     .group-header-title {
       font-size: 12px;
       font-weight: 600;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       padding: 4px 2px;
       cursor: pointer;
       display: flex;
@@ -934,9 +971,9 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       font-size: 12.5px;
       font-weight: 600;
       border-radius: 6px;
-      border: 1px solid #3F7A63;
-      background: #3F7A63;
-      color: #ffffff;
+      border: 1px solid var(--q-success);
+      background: var(--q-success);
+      color: var(--q-on-solid);
       cursor: pointer;
       transition: all 0.15s ease;
       display: inline-flex;
@@ -951,7 +988,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     .quota-btn.secondary {
       background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.04));
       border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .quota-btn.secondary:hover {
       background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.08));
@@ -959,12 +996,12 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     .quota-btn.danger {
       background: rgba(176, 74, 70, 0.1);
       border-color: rgba(176, 74, 70, 0.3);
-      color: #B04A46;
+      color: var(--q-error);
     }
     .quota-btn.danger:hover {
-      background: #B04A46;
-      color: #ffffff;
-      border-color: #B04A46;
+      background: var(--q-error);
+      color: var(--q-on-solid);
+      border-color: var(--q-error);
     }
     .quota-btn.action {
       padding: 4px 10px;
@@ -985,7 +1022,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       background: transparent;
       border: none;
       border-radius: 6px;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       cursor: pointer;
       transition: all 0.15s ease;
       padding: 0;
@@ -993,11 +1030,11 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .quota-icon-btn:hover {
       background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.06));
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .quota-icon-btn.danger:hover {
       background: rgba(176, 74, 70, 0.12);
-      color: #B04A46;
+      color: var(--q-error);
     }
     .quota-icon-btn.spinning svg {
       animation: spin 0.75s linear infinite;
@@ -1012,13 +1049,13 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       border-radius: 6px;
       border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
       background: var(--dsw-alias-bg-base, #ffffff);
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
       outline: none;
       transition: border-color 0.15s ease;
       font-family: inherit;
     }
     .quota-input:focus {
-      border-color: #3F7A63;
+      border-color: var(--q-success);
       box-shadow: 0 0 0 2px rgba(63, 122, 99, 0.15);
     }
 
@@ -1043,7 +1080,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       font-weight: 600;
       border: none;
       background: transparent;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       border-radius: 6px;
       cursor: pointer;
       transition: all 0.15s ease;
@@ -1053,13 +1090,13 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .quota-segmented-btn.active {
       background: var(--dsw-alias-bg-base, #ffffff);
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
     }
     .quota-count-pill {
       font-size: 10.5px;
       background: rgba(63, 122, 99, 0.12);
-      color: #3F7A63;
+      color: var(--q-success);
       padding: 0 6px;
       border-radius: 10px;
       font-weight: 700;
@@ -1094,13 +1131,13 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       width: 14px;
       left: 2px;
       bottom: 2px;
-      background-color: #ffffff;
+      background-color: var(--q-on-solid);
       border-radius: 50%;
       transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
     }
     .quota-switch input:checked + .quota-switch-slider {
-      background-color: #3F7A63;
+      background-color: var(--q-success);
     }
     .quota-switch input:checked + .quota-switch-slider:before {
       transform: translateX(16px);
@@ -1126,7 +1163,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     .quota-table th {
       padding: 10px 14px;
       background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       font-weight: 600;
       font-size: 12px;
       border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.06));
@@ -1153,13 +1190,13 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.08));
     }
     .quota-table-row.drag-over-top td {
-      border-top: 2px solid var(--dsw-alias-brand-primary, #0969da);
+      border-top: 2px solid var(--dsw-alias-brand-primary, var(--q-brand));
     }
     .quota-table-row.drag-over-bottom td {
-      border-bottom: 2px solid var(--dsw-alias-brand-primary, #0969da);
+      border-bottom: 2px solid var(--dsw-alias-brand-primary, var(--q-brand));
     }
     .sort-drag-handle {
-      color: var(--dsw-alias-label-tertiary, #8c959f);
+      color: var(--dsw-alias-label-tertiary, var(--q-fg-3));
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -1168,7 +1205,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .quota-table-row:hover .sort-drag-handle {
       opacity: 1;
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .service-name-cell {
       font-weight: 600;
@@ -1184,7 +1221,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .service-name-cell:hover span:first-child {
       text-decoration: underline;
-      color: #3F7A63;
+      color: var(--q-success);
     }
 
     /* Detailed Settings Modal Component */
@@ -1221,7 +1258,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       background: transparent;
       border: none;
       font-size: 18px;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       cursor: pointer;
       padding: 4px 8px;
       border-radius: 4px;
@@ -1260,7 +1297,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       right: 8px;
       background: transparent;
       border: none;
-      color: var(--dsw-alias-label-tertiary, #8c959f);
+      color: var(--dsw-alias-label-tertiary, var(--q-fg-3));
       cursor: pointer;
       padding: 3px 5px;
       border-radius: 4px;
@@ -1268,7 +1305,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       align-items: center;
     }
     .btn-toggle-eye:hover {
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .drawer-info-card {
       background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
@@ -1286,12 +1323,12 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       align-items: center;
     }
     .drawer-info-label {
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       font-weight: 500;
     }
     .drawer-info-val {
       font-weight: 600;
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .drawer-test-row {
       display: flex;
@@ -1306,11 +1343,11 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .drawer-test-result.ok {
       display: inline-block;
-      color: #3F7A63;
+      color: var(--q-success);
     }
     .drawer-test-result.err {
       display: inline-block;
-      color: #B04A46;
+      color: var(--q-error);
     }
 
     /* Drawer HUD Metrics List */
@@ -1342,11 +1379,11 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       cursor: pointer;
       user-select: none;
       font-size: 12.5px;
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .hud-metric-checkbox-row input[type="checkbox"] {
       cursor: pointer;
-      accent-color: #3F7A63;
+      accent-color: var(--q-success);
       width: 15px;
       height: 15px;
     }
@@ -1372,7 +1409,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       justify-content: space-between;
     }
     .add-service-option:hover {
-      border-color: #3F7A63;
+      border-color: var(--q-success);
       background: rgba(63, 122, 99, 0.04);
       transform: translateY(-1px);
     }
@@ -1428,7 +1465,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
     .dsh-quota-modal {
       background: var(--dsw-alias-bg-base, #ffffff);
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
       border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.15));
       border-radius: 12px;
       padding: 20px 24px;
@@ -1447,11 +1484,11 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     .dsh-quota-modal-title {
       font-size: 16px;
       font-weight: 700;
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--dsw-alias-label-primary, var(--q-fg));
     }
     .dsh-quota-modal-body {
       font-size: 13.5px;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--dsw-alias-label-secondary, var(--q-fg-2));
       line-height: 1.5;
     }
     .dsh-quota-modal-footer {
@@ -1465,8 +1502,8 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       top: 24px;
       left: 50%;
       transform: translateX(-50%) translateY(-20px) scale(0.95);
-      background: var(--dsw-alias-label-primary, #1f2328);
-      color: #ffffff;
+      background: var(--dsw-alias-label-primary, var(--q-fg));
+      color: var(--q-on-solid);
       padding: 9px 20px;
       border-radius: 20px;
       font-size: 13px;
@@ -1487,13 +1524,293 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       pointer-events: auto;
     }
     .dsh-quota-toast.success {
-      background: #2da44e;
+      background: var(--q-success);
     }
     .dsh-quota-toast.error {
-      background: #cf222e;
+      background: var(--q-error);
     }
-    .dsh-quota-toast.info {
-      background: #0969da;
+
+    /* ============================================================
+       0.4.1 visual system: theme tokens, type scale, responsive
+       ============================================================ */
+    [data-dsh-quota-view] {
+      --q-bg-fb: #ffffff;
+      --q-bg-1-fb: rgba(0, 0, 0, 0.04);
+      --q-bg-2-fb: rgba(0, 0, 0, 0.06);
+      --q-fg-fb: #1f2328;
+      --q-fg-2-fb: #57606a;
+      --q-fg-3-fb: #8c959f;
+      --q-border-fb: rgba(0, 0, 0, 0.1);
+      --q-border-1-fb: rgba(0, 0, 0, 0.08);
+      --q-track-fb: rgba(0, 0, 0, 0.14);
+
+      --q-bg: var(--dsw-alias-bg-base, var(--q-bg-fb));
+      --q-bg-1: var(--dsw-alias-bg-layer-1, var(--q-bg-1-fb));
+      --q-bg-2: var(--dsw-alias-bg-layer-2, var(--q-bg-2-fb));
+      --q-fg: var(--dsw-alias-label-primary, var(--q-fg-fb));
+      --q-fg-2: var(--dsw-alias-label-secondary, var(--q-fg-2-fb));
+      --q-fg-3: var(--dsw-alias-label-tertiary, var(--q-fg-3-fb));
+      --q-border: var(--dsw-alias-border-l2, var(--q-border-fb));
+      --q-border-1: var(--dsw-alias-border-l1, var(--q-border-1-fb));
+      --q-track: var(--dsw-alias-border-l1, var(--q-track-fb));
+
+      --q-brand: var(--dsw-alias-brand-primary, #0969da);
+      /* Original muted palette (青绿 / 赭黄 / 砖红). The host state tokens are
+         noticeably brighter in the light theme, and the muted trio is what the
+         plugin shipped with. Dark mode gets a lighter tint of the same hue below
+         so small labels stay legible without changing the identity. */
+      --q-btn: #3F7A63;
+      --q-btn-hover: #336350;
+      --q-btn-fg: #ffffff;
+      --q-success: #3F7A63;
+      --q-warn: #BA8137;
+      --q-error: #B04A46;
+      --q-on-solid: var(--dsw-alias-label-primary-foreground, #ffffff);
+
+      --q-radius-sm: 6px;
+      --q-radius: 8px;
+      --q-radius-lg: 12px;
+      --q-font-xs: 11px;
+      --q-font-sm: 12px;
+      --q-font: 13px;
+      --q-font-lg: 14px;
+      --q-font-xl: 17.5px;
+      --q-gap: 12px;
+      --q-gap-sm: 8px;
+    }
+    @media (prefers-color-scheme: dark) {
+      [data-dsh-quota-view] {
+        --q-bg-fb: #17181b;
+        --q-bg-1-fb: #1e1f23;
+        --q-bg-2-fb: #26272c;
+        --q-fg-fb: #e8e8e8;
+        --q-fg-2-fb: #9aa0a6;
+        --q-fg-3-fb: #7d838a;
+        --q-border-fb: #33353a;
+        --q-border-1-fb: #2a2c31;
+        --q-track-fb: #3a3d43;
+        --q-success: #6fa78f;
+        --q-warn: #d0a25f;
+        --q-error: #cf827d;
+        --q-btn: #5c9880;
+        --q-btn-hover: #6aa88b;
+        --q-btn-fg: #101114;
+      }
+    }
+
+    /* Type scale: one family of sizes instead of ten near-duplicates. */
+    .quota-container { font-size: var(--q-font); }
+    .quota-title { font-size: var(--q-font-xl); }
+    .summary-card-label,
+    .summary-sub,
+    .row-metric-caption,
+    .quota-updated-tag { font-size: var(--q-font-xs); }
+    .summary-card-val { font-size: 20px; }
+    .auth-section-title { font-size: var(--q-font-lg); }
+    .row-main-label { font-size: var(--q-font); }
+    .row-sub-label { font-size: var(--q-font-sm); }
+    .category-chip,
+    .quota-tab-btn,
+    .quota-segmented-btn { font-size: var(--q-font-sm); }
+
+    /* Radii: 6 / 8 / 12 only. */
+    .quota-section,
+    .summary-card,
+    .quota-pref-card,
+    .quota-table-wrap,
+    .official-long-card,
+    .dsh-quota-modal { border-radius: var(--q-radius); }
+    .quota-tab-btn,
+    .quota-segmented-btn { border-radius: var(--q-radius-sm); }
+    .auth-group-block { border-radius: var(--q-radius); }
+
+    /* Primary actions use the host button token; green stays semantic. */
+    .btn-add-service,
+    .quota-btn.action,
+    .btn-drawer-save { background: var(--q-btn); border-color: var(--q-btn); color: var(--q-btn-fg); }
+    .btn-add-service:hover,
+    .quota-btn.action:hover,
+    .btn-drawer-save:hover { background: var(--q-btn-hover); border-color: var(--q-btn-hover); }
+    .quota-btn.secondary { background: transparent; color: var(--q-fg); border-color: var(--q-border); }
+    .quota-btn.secondary:hover { background: var(--q-bg-1); }
+
+    /* Active tab/chip: neutral inversion, theme-aware in light and dark. */
+    .quota-tab-btn.active,
+    .quota-segmented-btn.active { background: var(--q-bg); color: var(--q-fg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+    .category-chip.active { background: var(--q-fg); border-color: var(--q-fg); color: var(--q-bg); font-weight: 600; }
+    .category-chip { color: var(--q-fg-2); border-color: var(--q-border-1); }
+
+    /* Toast: neutral uses the inverse surface so dark mode stays readable. */
+    .dsh-quota-toast { background: var(--q-fg); color: var(--q-bg); }
+    .dsh-quota-toast.success,
+    .dsh-quota-toast.error,
+    .dsh-quota-toast.info { color: var(--q-on-solid); }
+
+    /* Header: title line + secondary status line; actions keep their own row. */
+    .quota-header { flex-wrap: wrap; row-gap: 10px; gap: 12px; }
+    .quota-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 4px; min-width: 0; }
+    .quota-header-actions { display: flex; gap: 10px; align-items: center; margin-left: auto; }
+    .quota-updated-tag { color: var(--q-fg-3); font-weight: 500; white-space: nowrap; }
+    .quota-updated-tag.is-stale { color: var(--q-warn); font-weight: 600; }
+    .quota-refresh-interval { color: var(--q-fg-3); font-size: var(--q-font-xs); white-space: nowrap; cursor: pointer; }
+    .quota-refresh-interval:hover { color: var(--q-fg-2); }
+
+    /* Summary: four mutually exclusive buckets + a sub-line per tile. */
+    .dashboard-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--q-gap); }
+    .summary-card { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .summary-card .summary-card-val { line-height: 1.1; }
+    .summary-sub { color: var(--q-fg-3); line-height: 1.3; }
+    .summary-sub .trend-up { color: var(--q-error); }
+    .summary-sub .trend-down { color: var(--q-success); }
+    .summary-sub .trend-flat { color: var(--q-fg-3); }
+
+    /* Category chips: scrollable strip with edge fade and arrow affordance. */
+    .category-filter-wrap { position: relative; }
+    .category-filter-bar { scroll-behavior: smooth; scrollbar-width: none; padding: 0 2px 2px; }
+    .category-filter-bar::-webkit-scrollbar { display: none; }
+    .category-filter-wrap::before,
+    .category-filter-wrap::after {
+      content: ''; position: absolute; top: 0; bottom: 2px; width: 24px; pointer-events: none; z-index: 1;
+      opacity: 0; transition: opacity 0.15s ease;
+    }
+    .category-filter-wrap::before { left: 0; background: linear-gradient(90deg, var(--q-bg), transparent); }
+    .category-filter-wrap::after { right: 0; background: linear-gradient(270deg, var(--q-bg), transparent); }
+    .category-filter-wrap.can-scroll-left::before,
+    .category-filter-wrap.can-scroll-right::after { opacity: 1; }
+    .category-scroll-btn {
+      position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+      width: 22px; height: 22px; padding: 0; border-radius: 50%;
+      border: 1px solid var(--q-border); background: var(--q-bg); color: var(--q-fg-2);
+      display: none; align-items: center; justify-content: center; cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); font-size: 11px; line-height: 1;
+    }
+    .category-filter-wrap.can-scroll-left .category-scroll-btn.prev,
+    .category-filter-wrap.can-scroll-right .category-scroll-btn.next { display: flex; }
+    .category-scroll-btn.prev { left: -6px; }
+    .category-scroll-btn.next { right: -6px; }
+
+    /* Cards: long names and hosts ellipsize instead of pushing the row open. */
+    .auth-title-row { gap: var(--q-gap-sm); align-items: flex-start; }
+    .auth-title-main { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
+    .auth-section-title { min-width: 0; display: flex; align-items: center; gap: 6px; }
+    .auth-section-title > .service-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .auth-card-meta { display: flex; gap: 8px; align-items: center; flex: none; }
+    .auth-host { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--q-fg-2); font-size: var(--q-font-sm); }
+    .btn-card-refresh { width: 28px; height: 28px; padding: 0; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; }
+    .quota-icon-btn { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; }
+    .quota-icon-btn.danger:hover { color: var(--q-error); background: color-mix(in srgb, var(--q-error) 12%, transparent); }
+
+    /* Ring: 32px with the percentage inside; the textual percentage is gone. */
+    .row-right-metric { display: flex; align-items: center; gap: 10px; flex: none; }
+    .row-ring { position: relative; width: 32px; height: 32px; flex: none; }
+    .row-ring svg { display: block; transform: rotate(-90deg); }
+    .row-ring .row-ring-label {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-size: 10px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+    }
+    .row-ring.is-zero .row-ring-label { color: var(--q-error); }
+    .row-ring.is-wide .row-ring-label { font-size: 9px; }
+
+    /* Sparkline: bars, baseline, last point emphasised; no fabricated line. */
+    .spark-wrap { width: 84px; height: 26px; display: inline-flex; align-items: flex-end; gap: 2px; position: relative; }
+    .spark-wrap::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; border-top: 1px dashed var(--q-border-1); }
+    .spark-bar { flex: 1; border-radius: 2px 2px 0 0; background: color-mix(in srgb, var(--q-fg-3) 45%, transparent); min-height: 2px; }
+    .spark-bar.is-last { background: var(--q-fg-2); }
+    .spark-empty { font-size: var(--q-font-xs); color: var(--q-fg-3); white-space: nowrap; }
+
+    /* Provenance badge: official / local / estimate, with full source on hover. */
+    .quota-provenance {
+      font-size: 10px; font-weight: 600; padding: 1px 5px; border-radius: 4px;
+      border: 1px solid var(--q-border-1); color: var(--q-fg-3); background: transparent; white-space: nowrap;
+    }
+
+    /* Error card: inline retry plus collapsible detail. */
+    .error-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+    .error-detail { margin-top: 6px; font-size: var(--q-font-sm); color: var(--q-fg-2); }
+    .error-detail summary { cursor: pointer; color: var(--q-fg-3); }
+    .error-detail pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-size: var(--q-font-xs); color: var(--q-fg-2); }
+
+    /* Single-window groups have nothing to collapse: hide the toggle entirely. */
+    .auth-group-block .group-header-title.single-window { cursor: default; }
+    .auth-group-block .group-header-title.single-window .group-toggle { display: none; }
+
+    /* Skeleton: three placeholder cards while the first load is in flight. */
+    .quota-skeleton { border: 1px solid var(--q-border); border-radius: var(--q-radius); padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+    .skeleton-line { height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--q-bg-1) 25%, var(--q-bg-2) 37%, var(--q-bg-1) 63%); background-size: 400% 100%; animation: q-shimmer 1.4s ease infinite; }
+    .skeleton-line.w40 { width: 40%; } .skeleton-line.w70 { width: 70%; } .skeleton-line.w55 { width: 55%; }
+    @keyframes q-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+
+    /* Settings table: sticky header, hover, readable icon targets. */
+    .quota-table thead th { position: sticky; top: 0; z-index: 1; background: var(--q-bg); border-bottom: 1px solid var(--q-border); }
+    .quota-table-row:hover { background: var(--q-bg-1); }
+    .quota-table-row { border-bottom: 1px solid var(--q-border-1); }
+    .quota-switch { vertical-align: middle; }
+
+    /* Drawer: grouped fields and an inline test result. */
+    .drawer-section { display: flex; flex-direction: column; gap: 10px; padding: 12px 0; border-top: 1px solid var(--q-border-1); }
+    .drawer-section:first-of-type { border-top: none; padding-top: 0; }
+    .drawer-section-title { font-size: var(--q-font-sm); font-weight: 700; color: var(--q-fg-2); letter-spacing: 0.02em; }
+    .drawer-test-result { font-size: var(--q-font-sm); color: var(--q-fg-2); min-height: 18px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+    .drawer-test-result:empty { display: none; }
+    .drawer-test-result.ok, .drawer-test-result.err { font-weight: 600; }
+
+    /* Accessibility: visible focus, reduced motion. */
+    [data-dsh-quota-view] button:focus-visible,
+    [data-dsh-quota-view] input:focus-visible,
+    [data-dsh-quota-view] select:focus-visible,
+    [data-dsh-quota-view] summary:focus-visible {
+      outline: 2px solid var(--q-brand); outline-offset: 2px; border-radius: 4px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      [data-dsh-quota-view] * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+    }
+
+    /* Responsive: 1024 -> 2x2 summary, 720 -> compact header/table/rows. */
+    /* Spacing: keep the container on a 4px rhythm. */
+    .quota-container { gap: 16px; }
+    .quota-section { padding: 16px; gap: 10px; }
+    .summary-card { padding: 14px 16px; }
+    .category-filter-bar { gap: 8px; }
+    .auth-title-row { padding-bottom: 2px; }
+
+    @media (prefers-color-scheme: dark) {
+      .quota-section,
+      .summary-card,
+      .quota-pref-card { box-shadow: none; }
+      .quota-section,
+      .quota-table-row { border-color: var(--q-border-1); }
+    }
+
+    @media (max-width: 1024px) {
+      .dashboard-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      .quota-container { padding: 16px 14px 56px; gap: 14px; }
+      .quota-header { align-items: flex-start; }
+      .quota-header-actions { width: 100%; justify-content: space-between; margin-left: 0; }
+      #btn-refresh { padding: 5px 10px; white-space: nowrap; }
+      .auth-title-row { flex-wrap: wrap; }
+      .auth-card-meta { width: 100%; justify-content: flex-start; flex-wrap: wrap; row-gap: 4px; }
+      .auth-host { max-width: 100%; }
+      .quota-table thead { display: none; }
+      .quota-table, .quota-table tbody, .quota-table tr, .quota-table td { display: block; width: auto !important; }
+      .quota-table tr { padding: 8px 12px; border-bottom: 1px solid var(--q-border-1); }
+      .quota-table td { padding: 3px 0; border: none; text-align: left !important; }
+      .quota-table td[data-label] { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .quota-table td[data-label]::before { content: attr(data-label); color: var(--q-fg-2); font-size: var(--q-font-sm); }
+      .quota-table td[data-label='操作'] > div { justify-content: flex-end; }
+      .quota-table td[data-label='排序'] { display: none; }
+      .quota-table tr { padding: 10px 12px; }
+      .quota-table td[data-label] { min-height: 30px; }
+      .quota-table td[data-label='服务'] { font-weight: 600; font-size: var(--q-font); }
+      .row-sub-label { white-space: normal; overflow: visible; }
+    }
+    @media (max-width: 480px) {
+      .dashboard-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .summary-card { padding: 10px 12px; }
+      .summary-card-val { font-size: 18px; }
+      .quota-title { font-size: 16px; }
+      #btn-refresh { font-size: 12px; }
     }
   `
   document.head.appendChild(styleEl)
@@ -1594,24 +1911,27 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     if (target.kind === 'new_custom' || target.kind === 'custom') {
       const ep = target.kind === 'custom' ? target.endpoint : { id: '', name: '', baseUrl: 'https://api.openai.com', apiKey: '' }
       return `
+        <div class="drawer-section">
+          <div class="drawer-section-title">连接</div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-size: 12.5px; font-weight: 600;">显示名称 (自定义) <span style="color: #cf222e;">*</span></label>
+          <label style="font-size: 12.5px; font-weight: 600;">显示名称 (自定义) <span style="color: var(--q-error);">*</span></label>
           <input type="text" id="drawer-custom-name-input" class="quota-input" placeholder="例如：NewAPI 分发站 / OneAPI 主池" value="${esc(ep.name || '')}" />
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-size: 12.5px; font-weight: 600;">Base URL <span style="color: #cf222e;">*</span></label>
+          <label style="font-size: 12.5px; font-weight: 600;">Base URL <span style="color: var(--q-error);">*</span></label>
           <input type="text" id="drawer-cust-base" class="quota-input" placeholder="https://api.my-oneapi.com" value="${esc(ep.baseUrl || '')}" />
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-size: 12.5px; font-weight: 600;">API Key <span style="color: #cf222e;">*</span></label>
+          <label style="font-size: 12.5px; font-weight: 600;">API Key <span style="color: var(--q-error);">*</span></label>
           <div class="quota-input-affix-wrap">
             <input type="password" id="drawer-cust-key" class="quota-input" placeholder="sk-... / Key" value="${esc(ep.apiKey || '')}" />
-            <button type="button" class="btn-toggle-eye" data-target="#drawer-cust-key" title="切换显隐">👁</button>
+            <button type="button" class="btn-toggle-eye" data-target="#drawer-cust-key" aria-label="切换密钥显隐" title="切换显隐">👁</button>
           </div>
         </div>
         <div class="drawer-test-row">
           <button type="button" class="quota-btn secondary action btn-drawer-test-cust">测试连接</button>
-          <span class="drawer-test-result" id="drawer-test-result"></span>
+          <span class="drawer-test-result" id="drawer-test-result" role="status" aria-live="polite"></span>
+        </div>
         </div>
         ${hudMetricsHtml}
       `
@@ -1643,7 +1963,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           <label style="font-size: 12.5px; font-weight: 600;">Session Token (WorkosCursorSessionToken)</label>
           <div class="quota-input-affix-wrap">
             <input type="password" id="drawer-key-input" class="quota-input" placeholder="从浏览器 Cookie 复制 WorkosCursorSessionToken" value="${esc(provConf.sessionToken || '')}" />
-            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
+            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" aria-label="切换密钥显隐" title="切换显隐">👁</button>
           </div>
           <button type="button" class="quota-btn secondary action btn-connect-cursor" style="align-self: flex-start; margin-top: 4px;">从本地 Cursor 提取登录态</button>
         </div>
@@ -1663,7 +1983,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         </div>
         <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
           <button type="button" class="quota-btn secondary action btn-login-antigravity">${isAuthed ? '重新授权 Google' : 'Google 账号授权登录'}</button>
-          <span style="font-size: 12px; color: ${isAuthed ? '#3F7A63' : 'var(--dsw-alias-label-tertiary)'}; font-weight: 600;">
+          <span style="font-size: 12px; color: ${isAuthed ? 'var(--q-success)' : 'var(--dsw-alias-label-tertiary)'}; font-weight: 600;">
             ${isAuthed ? `✓ 已连接 (${email || '已授权'})` : '未连接'}
           </span>
         </div>
@@ -1682,7 +2002,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         </div>
         <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
           <button type="button" class="quota-btn secondary action btn-login-codex">ChatGPT 授权登录</button>
-          <span style="font-size: 12px; color: ${isAuthed ? '#3F7A63' : 'var(--dsw-alias-label-tertiary)'}; font-weight: 600;">
+          <span style="font-size: 12px; color: ${isAuthed ? 'var(--q-success)' : 'var(--dsw-alias-label-tertiary)'}; font-weight: 600;">
             ${isAuthed ? '✓ 已获得授权 Token' : '未登录'}
           </span>
         </div>
@@ -1690,7 +2010,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           <label style="font-size: 12.5px; font-weight: 600;">手动填入 Access Token (可选)</label>
           <div class="quota-input-affix-wrap">
             <input type="password" id="drawer-key-input" class="quota-input" placeholder="access_token" value="${esc(provConf.oauth?.accessToken || '')}" />
-            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
+            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" aria-label="切换密钥显隐" title="切换显隐">👁</button>
           </div>
         </div>
       `
@@ -1709,17 +2029,17 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           <label style="font-size: 12.5px; font-weight: 600;">GitHub Token (可选手动填入)</label>
           <div class="quota-input-affix-wrap">
             <input type="password" id="drawer-key-input" class="quota-input" placeholder="gho_... / ghp_..." value="${esc(provConf.token || '')}" />
-            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
+            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" aria-label="切换密钥显隐" title="切换显隐">👁</button>
           </div>
         </div>
       `
     } else {
       customFieldsHtml = `
         <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-size: 12.5px; font-weight: 600;">${meta.keyLabel || 'API Key'} <span style="color: #cf222e;">*</span></label>
+          <label style="font-size: 12.5px; font-weight: 600;">${meta.keyLabel || 'API Key'} <span style="color: var(--q-error);">*</span></label>
           <div class="quota-input-affix-wrap">
             <input type="password" id="drawer-key-input" class="quota-input" placeholder="${meta.keyPlaceholder || 'API Key'}" value="${esc(provConf.apiKey || '')}" />
-            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" title="切换显隐">👁</button>
+            <button type="button" class="btn-toggle-eye" data-target="#drawer-key-input" aria-label="切换密钥显隐" title="切换显隐">👁</button>
           </div>
         </div>
         ${meta.hasGroupId ? `
@@ -1738,6 +2058,8 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
 
     return `
+      <div class="drawer-section">
+      <div class="drawer-section-title">连接与凭据</div>
       <div style="display: flex; flex-direction: column; gap: 6px;">
         <label style="font-size: 12.5px; font-weight: 600;">自定义显示名称 (选填)</label>
         <input type="text" id="drawer-custom-name-input" class="quota-input" placeholder="默认: ${meta.name}" value="${esc(currentCustomName)}" />
@@ -1747,11 +2069,11 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div class="drawer-info-card">
           <div class="drawer-info-row">
             <span class="drawer-info-label">凭据状态</span>
-            <span class="drawer-info-val" style="color: #3F7A63;">● ${credInfo.displayValue}</span>
+            <span class="drawer-info-val" style="color: var(--q-success);">● ${credInfo.displayValue}</span>
           </div>
           <div class="drawer-info-row">
             <span class="drawer-info-label">连接测活</span>
-            <span class="drawer-info-val" style="color: ${testRes?.ok ? '#3F7A63' : (testRes ? '#B04A46' : 'var(--dsw-alias-label-tertiary)')};">
+            <span class="drawer-info-val" style="color: ${testRes?.ok ? 'var(--q-success)' : (testRes ? 'var(--q-error)' : 'var(--dsw-alias-label-tertiary)')};">
               ${testRes ? (testRes.ok ? `正常 · ${testRes.latencyMs ?? 0}ms` : `异常 · ${testRes.message || '连接失败'}`) : '未测活'}
             </span>
           </div>
@@ -1762,7 +2084,8 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
 
       <div class="drawer-test-row">
         <button type="button" class="quota-btn secondary action btn-drawer-test">测试连接</button>
-        <span class="drawer-test-result" id="drawer-test-result"></span>
+        <span class="drawer-test-result" id="drawer-test-result" role="status" aria-live="polite"></span>
+      </div>
       </div>
 
       ${hudMetricsHtml}
@@ -1793,28 +2116,40 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     let contentHtml = ''
 
     if (state.activeTab === 'overview') {
-      // 1. Summary Grid
+      // 1. Summary Grid — mutually exclusive buckets, so ok + warn + error = total.
       const totalServices = state.cards.length
-      const activeServices = state.cards.filter(c => c.status === 'ok' || c.status === 'warn').length
+      const okServices = state.cards.filter(c => c.status === 'ok').length
+      const warnServices = state.cards.filter(c => c.status === 'warn').length
+      const errorServices = state.cards.filter(c => c.status === 'error' || c.status === 'disabled').length
       const alarmCount = state.alarms.length
+      const disabledCount = state.allCards.filter(c => c.status === 'disabled').length
+      const refreshSec = state.config?.refreshIntervalSeconds ?? 60
+      const refreshText = refreshSec < 60 ? `${refreshSec} 秒` : `${Math.round(refreshSec / 60)} 分钟`
+      const previousDay = totalServices > 0
+        ? recordDailySummary({ total: totalServices, ok: okServices, warn: warnServices, error: errorServices })
+        : {}
 
       const summaryGridHtml = `
         <div class="dashboard-summary-grid">
-          <div class="summary-card">
+          <div class="summary-card" title="已配置并在看板展示的服务数">
             <span class="summary-card-label">已监控服务</span>
             <span class="summary-card-val">${totalServices}</span>
+            <span class="summary-sub">${disabledCount > 0 ? `另有 ${disabledCount} 个未配置` : `每 ${refreshText}刷新`}</span>
           </div>
-          <div class="summary-card">
+          <div class="summary-card" title="状态正常且没有告警的服务">
             <span class="summary-card-label">正常运行</span>
-            <span class="summary-card-val" style="color: #3F7A63;">${activeServices}</span>
+            <span class="summary-card-val" style="color: var(--q-success);">${okServices}</span>
+            <span class="summary-sub">${renderSummaryDelta(okServices, previousDay.ok, false)}</span>
           </div>
-          <div class="summary-card">
-            <span class="summary-card-label">告警 / 异常</span>
-            <span class="summary-card-val" style="color: ${alarmCount > 0 ? '#B04A46' : 'var(--dsw-alias-label-secondary)'};">${alarmCount}</span>
+          <div class="summary-card" title="额度低于阈值或窗口耗尽">
+            <span class="summary-card-label">告警</span>
+            <span class="summary-card-val" style="color: ${warnServices > 0 ? 'var(--q-warn)' : 'var(--q-fg-2)'};">${warnServices}</span>
+            <span class="summary-sub">${alarmCount} 条告警 ${renderSummaryDelta(warnServices, previousDay.warn, true)}</span>
           </div>
-          <div class="summary-card">
-            <span class="summary-card-label">自动刷新</span>
-            <span class="summary-card-val" style="font-size: 14px; margin-top: 4px;">每 ${state.config?.refreshIntervalSeconds ?? 60}s</span>
+          <div class="summary-card" title="凭据或网络异常的服务">
+            <span class="summary-card-label">异常</span>
+            <span class="summary-card-val" style="color: ${errorServices > 0 ? 'var(--q-error)' : 'var(--q-fg-2)'};">${errorServices}</span>
+            <span class="summary-sub">${renderSummaryDelta(errorServices, previousDay.error, true)}</span>
           </div>
         </div>
       `
@@ -1822,17 +2157,40 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       // 2. Category tabs
       const categories: Array<'all' | ProviderCategory> = ['all', 'domestic_llm', 'ide', 'official_cloud', 'custom_api']
       const categoryTabsHtml = `
-        <div class="category-filter-bar">
-          ${categories.map(cat => `
-            <button class="category-chip ${state.activeCategory === cat ? 'active' : ''}" data-cat="${cat}">
-              ${CATEGORY_NAMES[cat]}
-            </button>
-          `).join('')}
+        <div class="category-filter-wrap" data-category-wrap>
+          <button type="button" class="category-scroll-btn prev" data-scroll="-1" aria-label="向左滚动分类">‹</button>
+          <div class="category-filter-bar" role="tablist" aria-label="服务分类">
+            ${categories.map(cat => `
+              <button class="category-chip ${state.activeCategory === cat ? 'active' : ''}" data-cat="${cat}" role="tab" aria-selected="${state.activeCategory === cat}">
+                ${CATEGORY_NAMES[cat]}
+              </button>
+            `).join('')}
+          </div>
+          <button type="button" class="category-scroll-btn next" data-scroll="1" aria-label="向右滚动分类">›</button>
         </div>
       `
 
-      // 3. Sections list
-      const sectionsHtml = state.cards.length === 0
+      // 3. Sections list — skeleton first, then empty state, then cards.
+      const skeletonHtml = `
+        <div class="quota-skeleton" aria-hidden="true">
+          <div class="skeleton-line w40"></div>
+          <div class="skeleton-line w70"></div>
+          <div class="skeleton-line w55"></div>
+        </div>
+        <div class="quota-skeleton" aria-hidden="true">
+          <div class="skeleton-line w40"></div>
+          <div class="skeleton-line w70"></div>
+          <div class="skeleton-line w55"></div>
+        </div>
+        <div class="quota-skeleton" aria-hidden="true">
+          <div class="skeleton-line w40"></div>
+          <div class="skeleton-line w70"></div>
+          <div class="skeleton-line w55"></div>
+        </div>
+      `
+      const sectionsHtml = (state.cards.length === 0 && state.loading)
+        ? skeletonHtml
+        : state.cards.length === 0
         ? `
           <div style="text-align: center; color: var(--dsw-alias-label-tertiary, #888); padding: 56px 20px; display: flex; flex-direction: column; align-items: center; gap: 10px;">
             <span style="font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-secondary);">暂无可展示的服务</span>
@@ -1859,10 +2217,17 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                 <div class="official-long-card">
                   <div class="card-row">
                     <div class="row-left-content">
-                      <span class="row-main-label" style="color: var(--dsw-alias-label-error, #cf222e);">${card.error || '未连接'}</span>
-                      <span class="row-sub-label">请在设置中检查凭据配置</span>
+                      <span class="row-main-label" style="color: var(--q-error);">连接失败</span>
+                      <span class="row-sub-label">请在设置中检查凭据或网络配置</span>
+                      <details class="error-detail">
+                        <summary>错误详情</summary>
+                        <pre>${esc(card.error || '未返回错误信息')}</pre>
+                      </details>
                     </div>
-                    <div>${actionBtn}</div>
+                    <div class="error-actions">
+                      <button type="button" class="quota-btn secondary btn-card-retry" data-retry-id="${card.id}" aria-label="重试 ${esc(card.name)}">重试</button>
+                      ${actionBtn}
+                    </div>
                   </div>
                 </div>
               `
@@ -1883,7 +2248,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                       : '—'
                     const amountColor = amountText === '—'
                       ? 'var(--dsw-alias-label-tertiary, #888)'
-                      : 'var(--dsw-alias-label-primary, #1f2328)'
+                      : 'var(--dsw-alias-label-primary, var(--q-fg))'
                     return `
                       <div class="card-row">
                         <div class="row-left-content">
@@ -1931,27 +2296,27 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                   }
 
                   const rem = Math.max(0, Math.min(100, Math.round(win.remainingPercent)))
-                  const statusColor = getQuotaStatusColor(rem)
                   return `
                     <div class="card-row">
                       <div class="row-left-content">
-                        <span class="row-main-label" title="${win.label}">${win.label}</span>
-                        <span class="row-sub-label" title="${subText}">${subText}</span>
+                        <span class="row-main-label" title="${esc(win.label)}">${win.label}</span>
+                        <span class="row-sub-label" title="${esc(subText)}">${subText}</span>
                       </div>
                       <div class="row-right-metric">
-                        ${Array.isArray(card.sparkline) && card.sparkline.length >= 2 ? renderSparklineSvg(card.sparkline, rem, 80, 24) : ''}
-                        <span class="row-percent-number" style="color: ${statusColor};">${rem}%</span>
+                        ${renderSparklineSvg(card.sparkline)}
                         ${renderCircleProgress(rem)}
                       </div>
                     </div>
                   `
                 }).join('')
 
+                const collapsible = group.windows.length > 1
                 return `
                   <div class="auth-group-block">
-                    <div class="group-header-title" data-group-toggle="${groupKey}">
-                      <span>${group.title} (${group.windows.length})</span>
-                      <span style="font-size: 11px; opacity: 0.7;">${isCollapsed ? '展开 ▸' : '收起 ▾'}</span>
+                    <div class="group-header-title${collapsible ? '' : ' single-window'}"
+                      ${collapsible ? `data-group-toggle="${groupKey}" role="button" tabindex="0" aria-expanded="${!isCollapsed}"` : ''}>
+                      <span>${esc(group.title)} (${group.windows.length})</span>
+                      <span class="group-toggle" style="font-size: 11px; opacity: 0.7;">${isCollapsed ? '展开 ▸' : '收起 ▾'}</span>
                     </div>
                     <div class="official-long-card" style="display: ${isCollapsed ? 'none' : 'block'};">
                       ${rowsHtml}
@@ -1971,18 +2336,22 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
             const staleBadge = card.stale || card.sourceProvenance?.partial
               ? '<span class="quota-kind-badge" title="数据可能已过期或仅部分窗口可用">缓存</span>'
               : ''
+            const provenanceBadge = renderProvenanceBadge(card)
 
             return `
               <div class="quota-section" data-card-id="${card.id}">
                 <div class="auth-title-row">
-                  <div class="auth-section-title">
-                    <span>${card.name}</span>
-                    ${staleBadge}
+                  <div class="auth-title-main">
+                    <div class="auth-section-title">
+                      <span class="service-title" title="${esc(card.name)}">${card.name}</span>
+                      ${provenanceBadge}
+                      ${staleBadge}
+                    </div>
                   </div>
-                  <div style="display: flex; gap: 8px; align-items: center;">
+                  <div class="auth-card-meta">
                     ${rateBadge}
-                    ${card.account ? `<span style="font-size: 12px; color: var(--dsw-alias-label-secondary);">${card.account}</span>` : ''}
-                    <button class="btn-card-refresh ${isRefreshing ? 'spinning' : ''}" data-refresh-id="${card.id}" title="独立刷新此服务">↻</button>
+                    ${card.account ? `<span class="auth-host" title="${esc(card.account)}">${esc(card.account)}</span>` : ''}
+                    <button class="btn-card-refresh ${isRefreshing ? 'spinning' : ''}" data-refresh-id="${card.id}" aria-label="刷新 ${esc(card.name)}" title="刷新此服务">↻</button>
                     ${actionBtn}
                   </div>
                 </div>
@@ -2070,47 +2439,47 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
 
             return `
               <tr class="quota-table-row" data-service-id="${item.id}">
-                <td style="width: 28px; text-align: center;">
+                <td style="width: 28px; text-align: center;" data-label="排序">
                   <span class="sort-drag-handle" draggable="true" title="按住拖动排序">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="pointer-events: none;">
                       <path d="M5 4a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm6 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm-6 4a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm6 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm-6 4a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm6 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
                     </svg>
                   </span>
                 </td>
-                <td>
+                <td data-label="服务">
                   <div class="service-name-cell" data-id="${item.id}" data-custom="${item.isCustom ? 'true' : 'false'}" data-idx="${item.customIndex ?? ''}" title="点击打开详细设置">
                     <span>${item.name}</span>
-                    ${item.isCustom ? '<span style="font-size: 10px; background: rgba(9, 105, 218, 0.1); color: #0969da; padding: 1px 5px; border-radius: 4px; font-weight: 500;">中转</span>' : ''}
+                    ${item.isCustom ? '<span style="font-size: 10px; background: var(--q-bg-1); color: var(--q-fg-2); border: 1px solid var(--q-border-1); padding: 1px 5px; border-radius: 4px; font-weight: 500;">中转</span>' : ''}
                   </div>
                 </td>
-                <td style="width: 72px; text-align: center;">
+                <td style="width: 72px; text-align: center;" data-label="看板">
                   <label class="quota-switch" title="在监控看板中展示">
-                    <input type="checkbox" class="switch-dashboard cb-show-dashboard" data-id="${item.id}" ${isDashOn ? 'checked' : ''} />
+                    <input type="checkbox" class="switch-dashboard cb-show-dashboard" data-id="${item.id}" aria-label="在监控看板展示 ${esc(item.name)}" ${isDashOn ? 'checked' : ''} />
                     <span class="quota-switch-slider"></span>
                   </label>
                 </td>
-                <td style="width: 72px; text-align: center;">
+                <td style="width: 72px; text-align: center;" data-label="悬浮球">
                   <label class="quota-switch" title="在桌面悬浮球轮播中展示">
-                    <input type="checkbox" class="switch-hud cb-show-hud" data-id="${item.id}" ${isHudOn ? 'checked' : ''} />
+                    <input type="checkbox" class="switch-hud cb-show-hud" data-id="${item.id}" aria-label="在悬浮球展示 ${esc(item.name)}" ${isHudOn ? 'checked' : ''} />
                     <span class="quota-switch-slider"></span>
                   </label>
                 </td>
-                <td style="width: 108px; text-align: right;">
+                <td style="width: 108px; text-align: right;" data-label="操作">
                   <div style="display: inline-flex; align-items: center; gap: 4px;">
                     <!-- Small colorless lightning icon for test connection -->
-                    <button type="button" class="quota-icon-btn btn-row-test" data-id="${item.id}" title="测试连接">
+                    <button type="button" class="quota-icon-btn btn-row-test" data-id="${item.id}" aria-label="测试连接 ${esc(item.name)}" title="测试连接">
                       <svg width="13.5" height="13.5" viewBox="0 0 16 16" fill="currentColor" style="pointer-events: none;">
                         <path d="M8.5 1.5a.5.5 0 0 0-.915-.294l-5 7a.5.5 0 0 0 .415.794h3.75l-1.25 5.5a.5.5 0 0 0 .915.294l5-7a.5.5 0 0 0-.415-.794H7.25l1.25-5.5z"/>
                       </svg>
                     </button>
                     <!-- Small gear icon for edit & details -->
-                    <button type="button" class="quota-icon-btn btn-open-drawer" data-id="${item.id}" data-custom="${item.isCustom ? 'true' : 'false'}" data-idx="${item.customIndex ?? ''}" title="详细设置">
+                    <button type="button" class="quota-icon-btn btn-open-drawer" data-id="${item.id}" data-custom="${item.isCustom ? 'true' : 'false'}" data-idx="${item.customIndex ?? ''}" aria-label="详细设置 ${esc(item.name)}" title="详细设置">
                       <svg width="13.5" height="13.5" viewBox="0 0 16 16" fill="currentColor" style="pointer-events: none;">
                         <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
                       </svg>
                     </button>
                     <!-- Small trash icon for delete -->
-                    <button type="button" class="quota-icon-btn danger btn-row-delete" data-id="${item.id}" data-custom="${item.isCustom ? 'true' : 'false'}" data-idx="${item.customIndex ?? ''}" title="删除凭据">
+                    <button type="button" class="quota-icon-btn danger btn-row-delete" data-id="${item.id}" data-custom="${item.isCustom ? 'true' : 'false'}" data-idx="${item.customIndex ?? ''}" aria-label="删除 ${esc(item.name)}" title="删除凭据">
                       <svg width="13.5" height="13.5" viewBox="0 0 16 16" fill="currentColor" style="pointer-events: none;">
                         <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
                         <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
@@ -2213,7 +2582,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                 </div>
                 <div style="display: flex; align-items: center; gap: 10px;">
                   <input type="range" id="pref-alarm-slider" min="5" max="50" step="5" value="${esc(alarmThreshold)}" style="width: 140px; cursor: pointer;" />
-                  <span id="pref-alarm-val" style="font-size: 13px; font-weight: 700; color: #3F7A63; min-width: 36px;">${alarmThreshold}%</span>
+                  <span id="pref-alarm-val" style="font-size: 13px; font-weight: 700; color: var(--q-success); min-width: 36px;">${alarmThreshold}%</span>
                 </div>
               </div>
             </div>
@@ -2292,7 +2661,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       const optionsHtml = unconfigured.map(([id, meta]) => `
         <div class="add-service-option" data-id="${id}">
           <span class="add-service-option-name">${meta.name}</span>
-          <span style="font-size: 11px; color: #3F7A63; font-weight: 600;">+ 配置</span>
+          <span style="font-size: 11px; color: var(--q-success); font-weight: 600;">+ 配置</span>
         </div>
       `).join('')
 
@@ -2301,7 +2670,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           <div class="dsh-quota-modal" style="max-width: 460px;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <div class="dsh-quota-modal-title">选择要添加的服务</div>
-              <button type="button" class="btn-drawer-close btn-close-add-modal" style="font-size: 16px;">✕</button>
+              <button type="button" class="btn-drawer-close btn-close-add-modal" aria-label="关闭添加服务" style="font-size: 16px;">✕</button>
             </div>
             <div class="add-service-modal">
               ${optionsHtml || '<div style="grid-column: span 2; text-align: center; color: var(--dsw-alias-label-tertiary); padding: 20px 0;">已添加所有支持的官方服务</div>'}
@@ -2327,7 +2696,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
                 <span class="dsh-drawer-title">${drawerTitle}</span>
                 <span style="font-size: 11.5px; color: var(--dsw-alias-label-secondary); margin-left: 2px;">详细设置</span>
               </div>
-              <button type="button" class="btn-drawer-close btn-close-details-modal" title="关闭 (Esc)">✕</button>
+              <button type="button" class="btn-drawer-close btn-close-details-modal" aria-label="关闭设置抽屉" title="关闭 (Esc)">✕</button>
             </div>
             <div class="dsh-drawer-body">
               ${renderDrawerBody(activeDrawerTarget, cfg, cards)}
@@ -2345,7 +2714,14 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
     }
 
     const lastUpdatedClock = formatClockTime(state.lastUpdated)
-    const lastUpdatedLabel = lastUpdatedClock !== '' ? `最后更新 ${lastUpdatedClock}` : '尚未更新'
+    const headerRefreshSec = state.config?.refreshIntervalSeconds ?? 60
+    const dataAgeMs = state.lastUpdated > 0 ? Date.now() - state.lastUpdated : 0
+    const dataIsStale = state.lastUpdated > 0 && dataAgeMs > Math.max(120000, headerRefreshSec * 2000)
+    const relativeUpdated = formatRelativeTime(state.lastUpdated)
+    const lastUpdatedLabel = lastUpdatedClock !== ''
+      ? `最后更新 ${lastUpdatedClock}${relativeUpdated !== '' ? `（${relativeUpdated}）` : ''}`
+      : '尚未更新'
+    const headerRefreshLabel = headerRefreshSec < 60 ? `${headerRefreshSec} 秒` : `${Math.round(headerRefreshSec / 60)} 分钟`
     const errorBannerHtml = state.error
       ? `
         <div class="quota-error-banner" role="alert">
@@ -2363,15 +2739,19 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           <div class="quota-title">
             <span>AI 额度监控</span>
             <span class="quota-version-tag">v0.4.1</span>
-            <span class="quota-updated-tag" title="数据最后更新时间">${lastUpdatedLabel}</span>
-            ${state.loading ? '<span style="font-size: 12px; font-weight: normal; color: var(--dsw-alias-brand-primary, #0969da); margin-left: 8px;">正在刷新...</span>' : ''}
+            <span class="quota-updated-tag${dataIsStale ? ' is-stale' : ''}" role="status"
+              title="${dataIsStale ? '数据超过两个刷新周期未更新，可能已过期' : '数据最后更新时间'}">${lastUpdatedLabel}${dataIsStale ? ' · 可能已过期' : ''}</span>
+            <span class="quota-refresh-interval" data-goto-prefs role="button" tabindex="0" title="前往偏好设置">每 ${headerRefreshLabel}刷新</span>
+            ${state.loading ? '<span class="quota-refresh-interval" role="status">正在刷新…</span>' : ''}
           </div>
-          <div style="display: flex; gap: 10px; align-items: center;">
-            <div class="quota-tabs">
-              <button id="tab-overview" class="quota-tab-btn ${state.activeTab === 'overview' ? 'active' : ''}">监控看板</button>
-              <button id="tab-settings" class="quota-tab-btn ${state.activeTab === 'settings' ? 'active' : ''}">设置</button>
+          <div class="quota-header-actions">
+            <div class="quota-tabs" role="tablist" aria-label="监控面板切换">
+              <button id="tab-overview" role="tab" aria-selected="${state.activeTab === 'overview'}" class="quota-tab-btn ${state.activeTab === 'overview' ? 'active' : ''}">监控看板</button>
+              <button id="tab-settings" role="tab" aria-selected="${state.activeTab === 'settings'}" class="quota-tab-btn ${state.activeTab === 'settings' ? 'active' : ''}">设置</button>
             </div>
-            <button id="btn-refresh" class="quota-btn secondary">↻ 全部刷新</button>
+            <button id="btn-refresh" class="quota-btn secondary" aria-label="全部刷新" title="全部刷新">
+              <span aria-hidden="true">↻</span><span class="btn-label">全部刷新</span>
+            </button>
           </div>
         </div>
         ${errorBannerHtml}
@@ -2412,6 +2792,53 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         if (id) void controller.refreshSingle(id)
       })
     })
+    container.querySelectorAll('.btn-card-retry').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const id = btn.getAttribute('data-retry-id')
+        if (id) void controller.refreshSingle(id)
+      })
+    })
+    container.querySelectorAll('[data-group-toggle]').forEach(el => {
+      el.addEventListener('keydown', (event: Event) => {
+        const keyboard = event as KeyboardEvent
+        if (keyboard.key !== 'Enter' && keyboard.key !== ' ') return
+        keyboard.preventDefault()
+        const key = el.getAttribute('data-group-toggle')
+        if (key) controller.toggleGroupCollapse(key)
+      })
+    })
+    const gotoPrefs = (): void => {
+      controller.setTab('settings')
+    }
+    container.querySelectorAll('[data-goto-prefs]').forEach(el => {
+      el.addEventListener('click', gotoPrefs)
+      el.addEventListener('keydown', (event: Event) => {
+        const keyboard = event as KeyboardEvent
+        if (keyboard.key !== 'Enter' && keyboard.key !== ' ') return
+        keyboard.preventDefault()
+        gotoPrefs()
+      })
+    })
+    // Category strip: keep the edge fades and arrows in sync with the scroll box.
+    const categoryWrap = container.querySelector('[data-category-wrap]') as HTMLElement | null
+    const categoryBar = categoryWrap?.querySelector('.category-filter-bar') as HTMLElement | null
+    if (categoryWrap !== null && categoryBar !== null) {
+      const syncCategoryEdges = (): void => {
+        const overflow = categoryBar.scrollWidth - categoryBar.clientWidth > 2
+        categoryWrap.classList.toggle('can-scroll-left', overflow && categoryBar.scrollLeft > 2)
+        categoryWrap.classList.toggle('can-scroll-right', overflow && categoryBar.scrollLeft + categoryBar.clientWidth < categoryBar.scrollWidth - 2)
+      }
+      categoryWrap.querySelectorAll('.category-scroll-btn').forEach(btn => {
+        btn.addEventListener('click', (event) => {
+          event.stopPropagation()
+          const direction = Number(btn.getAttribute('data-scroll') || '1')
+          categoryBar.scrollBy({ left: direction * Math.max(120, categoryBar.clientWidth * 0.6), behavior: 'smooth' })
+        })
+      })
+      categoryBar.addEventListener('scroll', syncCategoryEdges, { passive: true })
+      window.setTimeout(syncCategoryEdges, 0)
+    }
 
     // Settings Sub-tab switching
     container.querySelectorAll('.quota-segmented-btn').forEach(btn => {
@@ -3079,11 +3506,11 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         if (fbEl) {
           if (res.ok) {
             fbEl.className = 'drawer-test-result ok'
-            fbEl.textContent = `✓ 连接成功 (${res.latencyMs ?? 0}ms)`
+            fbEl.textContent = `✓ 连接成功 · ${res.latencyMs ?? 0}ms`
           } else {
             fbEl.className = 'drawer-test-result err'
-            const msg = res.message || '连接失败'
-            fbEl.textContent = `✗ ${msg.length > 28 ? msg.slice(0, 28) + '...' : msg}`
+            fbEl.textContent = `✗ ${res.message || '连接失败'}`
+            fbEl.title = `✗ ${res.message || '连接失败'}`
           }
         }
       })
@@ -3113,11 +3540,11 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         if (fbEl) {
           if (res.ok) {
             fbEl.className = 'drawer-test-result ok'
-            fbEl.textContent = `✓ 连接成功 (${res.latencyMs ?? 0}ms)`
+            fbEl.textContent = `✓ 连接成功 · ${res.latencyMs ?? 0}ms`
           } else {
             fbEl.className = 'drawer-test-result err'
-            const msg = res.message || '连接失败'
-            fbEl.textContent = `✗ ${msg.length > 28 ? msg.slice(0, 28) + '...' : msg}`
+            fbEl.textContent = `✗ ${res.message || '连接失败'}`
+            fbEl.title = `✗ ${res.message || '连接失败'}`
           }
         }
       })

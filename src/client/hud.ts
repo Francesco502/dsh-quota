@@ -6,12 +6,34 @@ import type { QuotaKind } from './api.ts'
 interface HudMetric {
   key: string
   provider: string
+  /** Full `service · group · window` text; escaped once at the controller boundary. */
   name: string
+  /** Service display name for a popover row (ellipsised when the row is too narrow). */
+  service: string
+  /** Short metric label: 余额 / 5h / 周 / 月 / 滚动 / 量. */
+  shortLabel: string
   tag: string
   kind: QuotaKind
   remainingPercent?: number
   amountText?: string
 }
+
+type StatusTone = 'ok' | 'warn' | 'error'
+type FocusTarget = 'host' | 'pause' | 'panel' | null
+
+const HUD_SIZE = 46
+/** Below this viewport width the popover shrinks and always opens away from the right edge. */
+const NARROW_BREAKPOINT = 640
+const POSITION_STORAGE_KEY = 'dsh_quota_hud_pos'
+/** sessionStorage key required by the HUD contract; survives re-mounts in the same tab. */
+const PAUSED_STORAGE_KEY = 'dsh_quota_hud_paused'
+const CAROUSEL_INTERVAL_MS = 4500
+const ERROR_THRESHOLD_PERCENT = 15
+const WARN_THRESHOLD_PERCENT = 35
+const HOVER_HIDE_DELAY_MS = 140
+
+const PAUSE_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false"><rect x="4" y="3" width="3" height="10" rx="1" fill="currentColor"></rect><rect x="9" y="3" width="3" height="10" rx="1" fill="currentColor"></rect></svg>`
+const PLAY_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false"><path d="M5 3.4 12.2 8 5 12.6Z" fill="currentColor"></path></svg>`
 
 function isQuantifiedMetric(metric: HudMetric): boolean {
   return metric.kind === 'usage'
@@ -26,16 +48,106 @@ function metricValueText(metric: HudMetric): string {
   return '未知'
 }
 
+/**
+ * Condense a window into one of the six labels the popover row shows next to the
+ * service name. `quotaKind` wins, then the declared `windowKind`, then the raw
+ * label/id so legacy windows (no `windowKind`) still land on the right bucket.
+ */
+function inferMetricShortLabel(window: MetricWindow): string {
+  if (windowQuotaKind(window) === 'balance') return '余额'
+
+  switch (window.windowKind) {
+    case '5h': return '5h'
+    case 'weekly': return '周'
+    case 'monthly': return '月'
+    case 'sliding': return '滚动'
+    default: break
+  }
+
+  const text = `${window.label || ''} ${window.id || ''}`.toLowerCase()
+  if (/(^|[^0-9])5\s*[- ]?h|5\s*小时|five[\s-]?hour/.test(text)) return '5h'
+  if (/weekly|week|周/.test(text)) return '周'
+  if (/monthly|month|月度|月/.test(text)) return '月'
+  if (/slid|roll|滚动|滑动/.test(text)) return '滚动'
+  if (/balance|余额/.test(text)) return '余额'
+  return '量'
+}
+
+function statusTone(remainingPercent: number): StatusTone {
+  if (remainingPercent <= ERROR_THRESHOLD_PERCENT) return 'error'
+  if (remainingPercent <= WARN_THRESHOLD_PERCENT) return 'warn'
+  return 'ok'
+}
+
+/** Text for an element carrying escaped card text back out of an HTML attribute. */
+const HTML_ENTITIES: Record<string, string> = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&#39;': "'",
+}
+
+function decodeHudText(value: string): string {
+  return value.replace(/&(amp|lt|gt|quot|#39);/g, entity => HTML_ENTITIES[entity] ?? entity)
+}
+
+function metricAriaText(metric: HudMetric): string {
+  const service = decodeHudText(metric.service)
+  const label = metric.shortLabel === '量' ? '' : `${metric.shortLabel} `
+  if (isQuantifiedMetric(metric)) {
+    const percent = Math.round(metric.remainingPercent!)
+    if (percent <= 0) return `${service} ${label}剩余 0%，额度已耗尽`
+    return `${service} ${label}剩余 ${percent}%`
+  }
+  if (metric.kind === 'balance') return `${service} 余额 ${decodeHudText(metric.amountText || '未知')}`
+  if (metric.kind === 'liveness') return `${service} 仅连通性，未提供额度接口`
+  return `${service} 额度状态未知`
+}
+
 interface HudPosition {
   x: number
   y: number
 }
 
-const STORAGE_KEY = 'dsh_quota_hud_pos'
+interface PopoverPlacement {
+  vertical: 'pop-top' | 'pop-bottom'
+  horizontal: 'pop-left' | 'pop-right'
+}
+
+/**
+ * Pick where the hover card opens. Desktop keeps the historical side rule; narrow
+ * viewports prefer opening leftwards (right edge anchored to the ball) so the card
+ * never pokes past the right edge, falling back when the left side has no room.
+ */
+function computePopoverPlacement(position: HudPosition, viewportWidth: number): PopoverPlacement {
+  const vertical: PopoverPlacement['vertical'] = position.y < 200 ? 'pop-bottom' : 'pop-top'
+  if (viewportWidth >= NARROW_BREAKPOINT) {
+    return {
+      vertical,
+      horizontal: position.x > viewportWidth / 2 ? 'pop-right' : 'pop-left',
+    }
+  }
+
+  const cardWidth = Math.min(220, viewportWidth - 24)
+  const roomLeft = position.x + HUD_SIZE - 8
+  const roomRight = viewportWidth - position.x - 8
+  if (roomLeft >= cardWidth) return { vertical, horizontal: 'pop-right' }
+  if (roomRight >= cardWidth) return { vertical, horizontal: 'pop-left' }
+  return { vertical, horizontal: roomRight >= roomLeft ? 'pop-left' : 'pop-right' }
+}
+
+function neutralRingSvg(): string {
+  return `
+    <svg class="dsh-hud-svg" viewBox="0 0 46 46" aria-hidden="true" focusable="false">
+      <circle class="dsh-hud-ring-track" cx="23" cy="23" r="18"></circle>
+    </svg>
+  `
+}
 
 function getSavedPosition(): HudPosition {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(POSITION_STORAGE_KEY)
     if (raw) {
       const pos = JSON.parse(raw)
       if (typeof pos.x === 'number' && typeof pos.y === 'number') {
@@ -53,13 +165,31 @@ function getSavedPosition(): HudPosition {
 
 function savePosition(pos: HudPosition): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(pos))
+    localStorage.setItem(POSITION_STORAGE_KEY, JSON.stringify(pos))
+  } catch {}
+}
+
+function readPausedState(): boolean {
+  try {
+    return sessionStorage.getItem(PAUSED_STORAGE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function savePausedState(paused: boolean): void {
+  try {
+    sessionStorage.setItem(PAUSED_STORAGE_KEY, paused ? '1' : '0')
   } catch {}
 }
 
 export function mountQuotaHud(controller: QuotaController): () => void {
   const hudEl = document.createElement('div')
   hudEl.setAttribute('data-dsh-quota-hud', '')
+  hudEl.setAttribute('role', 'button')
+  hudEl.setAttribute('tabindex', '0')
+  hudEl.setAttribute('aria-haspopup', 'true')
+  hudEl.setAttribute('aria-expanded', 'false')
   hudEl.style.cssText = `
     position: fixed;
     z-index: 990;
@@ -74,18 +204,60 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   const styleEl = document.createElement('style')
   styleEl.textContent = `
     [data-dsh-quota-hud] {
+      --q-success: var(--dsw-alias-state-success-primary, #3F7A63);
+      --q-warn: var(--dsw-alias-state-warn-primary, #BA8137);
+      --q-error: var(--dsw-alias-state-error-primary, #B04A46);
+      --q-fg: var(--dsw-alias-label-primary, #1f2328);
+      --q-fg-2: var(--dsw-alias-label-secondary, #57606a);
+      --q-bg: var(--dsw-alias-bg-base, #fff);
+      --q-border: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+      --q-track: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.14));
+      /* The raw border token is a hairline; on dark surfaces it disappears.
+         Mixing it toward the label colour keeps the dial ring legible in both themes. */
+      --q-track-on-surface: color-mix(in srgb, var(--q-track) 70%, var(--q-fg) 30%);
+      --q-shadow: color-mix(in srgb, #000 24%, transparent);
+      --q-scrim: color-mix(in srgb, var(--q-fg) 9%, transparent);
+      --q-pulse-ring: color-mix(in srgb, var(--q-error) 45%, transparent);
+      --q-card-width: 240px;
       display: flex;
       align-items: center;
       justify-content: center;
+      font-family: inherit;
     }
-    .dsh-hud-circle {
+    @media (prefers-color-scheme: dark) {
+      [data-dsh-quota-hud] {
+        --q-bg: var(--dsw-alias-bg-base, #17191f);
+        --q-fg: var(--dsw-alias-label-primary, #e6edf3);
+        --q-fg-2: var(--dsw-alias-label-secondary, #9aa4b2);
+        --q-border: var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.18));
+        --q-track: var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.3));
+      }
+    }
+    @keyframes q-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 var(--q-pulse-ring); opacity: 1; }
+      50% { box-shadow: 0 0 0 6px var(--q-pulse-ring); opacity: 0.82; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      [data-dsh-quota-hud],
+      [data-dsh-quota-hud] * {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
+    [data-dsh-quota-hud]:focus-visible {
+      outline: 2px solid var(--q-fg);
+      outline-offset: 3px;
+      border-radius: 50%;
+    }
+    [data-dsh-quota-hud] .dsh-hud-circle {
       position: relative;
       width: 46px;
       height: 46px;
       border-radius: 50%;
-      background: var(--dsw-alias-bg-layer-1, #ffffff);
-      border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.14));
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+      background: var(--q-bg);
+      border: 1px solid var(--q-border);
+      box-shadow: 0 4px 14px var(--q-shadow);
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -93,17 +265,21 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       overflow: visible;
       transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.2s ease;
     }
-    .dsh-hud-circle:hover {
+    [data-dsh-quota-hud] .dsh-hud-circle:hover {
       transform: scale(1.06);
-      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+      box-shadow: 0 6px 18px var(--q-shadow);
     }
-    .dsh-hud-circle.docked {
+    [data-dsh-quota-hud] .dsh-hud-circle.docked {
       opacity: 0.72;
     }
-    .dsh-hud-circle.docked:hover {
+    [data-dsh-quota-hud] .dsh-hud-circle.docked:hover {
       opacity: 1;
     }
-    .dsh-hud-svg {
+    [data-dsh-quota-hud] .dsh-hud-circle.is-exhausted {
+      border-color: var(--q-error);
+      animation: q-pulse 1.8s ease-in-out infinite;
+    }
+    [data-dsh-quota-hud] .dsh-hud-svg {
       position: absolute;
       inset: 0;
       width: 46px;
@@ -111,7 +287,21 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       transform: rotate(-90deg);
       pointer-events: none;
     }
-    .dsh-hud-content {
+    [data-dsh-quota-hud] .dsh-hud-ring-track {
+      fill: none;
+      stroke: var(--q-track-on-surface, var(--q-track));
+      stroke-width: 3;
+    }
+    [data-dsh-quota-hud] .dsh-hud-ring-value {
+      fill: none;
+      stroke-width: 3;
+      stroke-linecap: round;
+      transition: stroke-dashoffset 0.4s ease, stroke 0.3s ease;
+    }
+    [data-dsh-quota-hud] .dsh-hud-ring-value.is-ok { stroke: var(--q-success); }
+    [data-dsh-quota-hud] .dsh-hud-ring-value.is-warn { stroke: var(--q-warn); }
+    [data-dsh-quota-hud] .dsh-hud-ring-value.is-error { stroke: var(--q-error); }
+    [data-dsh-quota-hud] .dsh-hud-content {
       position: relative;
       display: flex;
       flex-direction: column;
@@ -120,78 +310,182 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       line-height: 1;
       pointer-events: none;
     }
-    .dsh-hud-percent {
+    [data-dsh-quota-hud] .dsh-hud-percent {
       font-size: 11px;
       font-weight: 700;
-      color: var(--dsw-alias-label-primary, #1f2328);
+      color: var(--q-fg);
       letter-spacing: -0.2px;
+      font-variant-numeric: tabular-nums;
     }
-    .dsh-hud-tag {
+    [data-dsh-quota-hud] .dsh-hud-percent.is-empty {
+      color: var(--q-error);
+    }
+    [data-dsh-quota-hud] .dsh-hud-percent-amount {
+      font-size: 9.5px;
+    }
+    [data-dsh-quota-hud] .dsh-hud-percent-liveness {
+      font-size: 10px;
+    }
+    [data-dsh-quota-hud] .dsh-hud-tag {
       font-size: 8.5px;
       font-weight: 600;
-      color: var(--dsw-alias-label-secondary, #57606a);
+      color: var(--q-fg-2);
       margin-top: 1.5px;
       text-transform: uppercase;
+      letter-spacing: 0.2px;
     }
-    .dsh-hud-popover {
+    [data-dsh-quota-hud] .dsh-hud-popover {
       position: absolute;
-      width: 240px;
-      background: var(--dsw-alias-bg-layer-1, #ffffff);
-      border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.15));
+      width: var(--q-card-width);
+      max-height: min(60vh, 420px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      background: var(--q-bg);
+      border: 1px solid var(--q-border);
       border-radius: 10px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-      padding: 10px 12px;
+      box-shadow: 0 8px 24px var(--q-shadow);
+      padding: 9px 10px;
       display: none;
       flex-direction: column;
-      gap: 7px;
+      gap: 6px;
       pointer-events: none;
       z-index: 1000;
       font-family: inherit;
     }
-    .dsh-hud-popover.pop-top {
+    [data-dsh-quota-hud].is-hovered .dsh-hud-popover,
+    [data-dsh-quota-hud].is-open .dsh-hud-popover {
+      display: flex;
+      pointer-events: auto;
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover.pop-top {
       bottom: calc(100% + 8px);
     }
-    .dsh-hud-popover.pop-bottom {
+    [data-dsh-quota-hud] .dsh-hud-popover.pop-bottom {
       top: calc(100% + 8px);
     }
-    .dsh-hud-popover.pop-right {
+    [data-dsh-quota-hud] .dsh-hud-popover.pop-right {
       right: 0;
     }
-    .dsh-hud-popover.pop-left {
+    [data-dsh-quota-hud] .dsh-hud-popover.pop-left {
       left: 0;
     }
-    [data-dsh-quota-hud]:hover .dsh-hud-popover {
-      display: flex;
+    [data-dsh-quota-hud].is-narrow .dsh-hud-popover {
+      width: min(220px, calc(100vw - 24px));
+      max-height: min(320px, calc(100vh - 32px));
     }
-    .dsh-hud-popover-title {
+    [data-dsh-quota-hud] .dsh-hud-popover-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
       font-size: 11.5px;
       font-weight: 700;
-      color: var(--dsw-alias-label-primary, #1f2328);
-      border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.08));
+      color: var(--q-fg);
+      border-bottom: 1px solid var(--q-border);
       padding-bottom: 5px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
     }
-    .dsh-hud-popover-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      font-size: 11px;
-      color: var(--dsw-alias-label-secondary, #57606a);
-      gap: 8px;
-    }
-    .dsh-hud-popover-name {
-      font-weight: 600;
-      color: var(--dsw-alias-label-primary, #1f2328);
-      max-width: 145px;
+    [data-dsh-quota-hud] .dsh-hud-popover-title-text {
+      flex: 1 1 auto;
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .dsh-hud-popover-val {
-      font-weight: 700;
+    [data-dsh-quota-hud] .dsh-hud-popover-count {
       flex: none;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--q-fg-2);
+      font-variant-numeric: tabular-nums;
+    }
+    [data-dsh-quota-hud] .dsh-hud-icon-button {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 1px solid var(--q-border);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--q-fg-2);
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    [data-dsh-quota-hud] .dsh-hud-icon-button:hover {
+      color: var(--q-fg);
+      background: var(--q-scrim);
+    }
+    [data-dsh-quota-hud] .dsh-hud-icon-button:focus-visible {
+      outline: 2px solid var(--q-fg);
+      outline-offset: 1px;
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      padding: 2px 4px;
+      margin: 0 -4px;
+      border-radius: 6px;
+      font-size: 11px;
+      color: var(--q-fg-2);
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-row.is-active {
+      background: var(--q-scrim);
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-service {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+      color: var(--q-fg);
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-metric {
+      flex: none;
+      padding: 0 5px;
+      border: 1px solid var(--q-border);
+      border-radius: 999px;
+      background: var(--q-scrim);
+      color: var(--q-fg-2);
+      font-size: 9.5px;
+      font-weight: 600;
+      line-height: 1.5;
+      white-space: nowrap;
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-val {
+      flex: none;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-val.is-ok { color: var(--q-success); }
+    [data-dsh-quota-hud] .dsh-hud-popover-val.is-warn { color: var(--q-warn); }
+    [data-dsh-quota-hud] .dsh-hud-popover-val.is-error { color: var(--q-error); }
+    [data-dsh-quota-hud] .dsh-hud-popover-empty {
+      font-size: 11px;
+      color: var(--q-fg-2);
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-action {
+      width: 100%;
+      padding: 4px 6px;
+      border: 1px solid var(--q-border);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--q-fg-2);
+      font: inherit;
+      font-size: 10.5px;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-action:hover {
+      color: var(--q-fg);
+      background: var(--q-scrim);
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-action:focus-visible {
+      outline: 2px solid var(--q-fg);
+      outline-offset: 1px;
     }
   `
   document.head.appendChild(styleEl)
@@ -208,7 +502,20 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   let initialLeft = 0
   let initialTop = 0
   let moved = false
-  let isHovered = false
+  let isPointerOver = false
+  let isHoverCardVisible = false
+  let isPinned = false
+  let paused = readPausedState()
+  let hoverHideTimer: ReturnType<typeof setTimeout> | null = null
+
+  const motionQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : null
+  let prefersReducedMotion = motionQuery?.matches === true
+
+  // Distinguishes a touch tap from a mouse click on hybrid devices so only touch
+  // pins the card open while a mouse keeps the historical tap-to-open-panel action.
+  let lastInteractionWasTouch = false
 
   function bindDragEndListeners(): void {
     window.addEventListener('mousemove', onPointerMove)
@@ -235,9 +542,20 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     window.removeEventListener('blur', onPointerUp)
   }
 
+  function isHudButtonTarget(target: EventTarget | null): boolean {
+    const el = target as Element | null
+    if (!el || typeof el.closest !== 'function') return false
+    return el.closest('.dsh-hud-popover') !== null
+  }
+
   function onPointerDown(e: MouseEvent | TouchEvent) {
+    // Clicks inside the hover card (pause / open panel) are real controls: never
+    // start a drag from there or the follow-up "tap" would toggle the panel.
+    if (isHudButtonTarget(e.target)) return
+
     isDragging = true
     moved = false
+    lastInteractionWasTouch = 'touches' in e
     hudEl.style.cursor = 'grabbing'
     hudEl.style.transition = 'none'
 
@@ -278,7 +596,11 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     unbindDragEndListeners()
 
     if (!moved) {
-      controller.toggle()
+      // Touch has no hover: a tap opens the pinned card (pause button included)
+      // instead of jumping straight into the panel. The card's footer still
+      // reaches the panel, and desktop keeps its historical tap-to-open behaviour.
+      if (lastInteractionWasTouch) setPinned(!isPinned)
+      else controller.toggle()
       return
     }
 
@@ -298,12 +620,105 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   hudEl.addEventListener('mousedown', onPointerDown)
   hudEl.addEventListener('touchstart', onPointerDown, { passive: false })
 
-  hudEl.addEventListener('mouseenter', () => {
-    isHovered = true
+  function cancelHoverHide(): void {
+    if (hoverHideTimer !== null) {
+      clearTimeout(hoverHideTimer)
+      hoverHideTimer = null
+    }
+  }
+
+  function showHoverCard(): void {
+    cancelHoverHide()
+    if (isHoverCardVisible) return
+    isHoverCardVisible = true
+    hudEl.classList.add('is-hovered')
+  }
+
+  function hideHoverCardSoon(): void {
+    if (isPinned) return
+    cancelHoverHide()
+    // A short grace period lets the pointer cross the 8px gap into the card
+    // without the card unmounting mid-way (the gap is outside hudEl's box).
+    hoverHideTimer = setTimeout(() => {
+      hoverHideTimer = null
+      if (isPointerOver || isPinned) return
+      isHoverCardVisible = false
+      hudEl.classList.remove('is-hovered')
+    }, HOVER_HIDE_DELAY_MS)
+  }
+
+  hudEl.addEventListener('pointerenter', (event: PointerEvent) => {
+    if (event.pointerType !== 'mouse') return
+    isPointerOver = true
+    showHoverCard()
   })
-  hudEl.addEventListener('mouseleave', () => {
-    isHovered = false
+  hudEl.addEventListener('pointerleave', (event: PointerEvent) => {
+    if (event.pointerType !== 'mouse') return
+    isPointerOver = false
+    hideHoverCardSoon()
   })
+
+  function setPinned(value: boolean, options: { focusHud?: boolean } = {}): void {
+    if (isPinned === value) return
+    isPinned = value
+    hudEl.classList.toggle('is-open', isPinned)
+    hudEl.setAttribute('aria-expanded', isPinned ? 'true' : 'false')
+    render()
+    if (isPinned) {
+      cancelHoverHide()
+      hudEl.classList.add('is-hovered')
+    } else if (!isPointerOver) {
+      // Explicit close (tap again / Esc / open panel): hide now instead of waiting
+      // out the pointer-traversal grace period.
+      cancelHoverHide()
+      isHoverCardVisible = false
+      hudEl.classList.remove('is-hovered')
+      if (options.focusHud) hudEl.focus({ preventScroll: true })
+    } else if (options.focusHud) {
+      hudEl.focus({ preventScroll: true })
+    }
+  }
+
+  function togglePaused(): void {
+    paused = !paused
+    savePausedState(paused)
+    render()
+  }
+
+  function onHudClick(event: MouseEvent): void {
+    const target = event.target as Element | null
+    if (!target || typeof target.closest !== 'function') return
+
+    if (target.closest('.dsh-hud-pause')) {
+      event.preventDefault()
+      event.stopPropagation()
+      togglePaused()
+      return
+    }
+    if (target.closest('.dsh-hud-open-panel')) {
+      event.preventDefault()
+      event.stopPropagation()
+      setPinned(false)
+      controller.toggle()
+    }
+  }
+
+  function onHudKeyDown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      if (!isPinned) return
+      event.preventDefault()
+      setPinned(false, { focusHud: true })
+      return
+    }
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return
+    // Enter/Space on the pause button keeps its native button behaviour.
+    if (event.target !== hudEl) return
+    event.preventDefault()
+    setPinned(!isPinned)
+  }
+
+  hudEl.addEventListener('click', onHudClick)
+  hudEl.addEventListener('keydown', onHudKeyDown)
 
   // Window resize / monitor change: re-clamp so the HUD cannot end up off-screen.
   function clampHudPosition(): void {
@@ -329,6 +744,14 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     render()
   }
   window.addEventListener('resize', onWindowResize)
+
+  const onMotionPreferenceChange = (event: MediaQueryListEvent): void => {
+    prefersReducedMotion = event.matches
+    render()
+  }
+  if (motionQuery && typeof motionQuery.addEventListener === 'function') {
+    motionQuery.addEventListener('change', onMotionPreferenceChange)
+  }
 
   // Tag helper
   function getProviderTag(provider: string): string {
@@ -416,6 +839,8 @@ export function mountQuotaHud(controller: QuotaController): () => void {
         key: makeHudMetricKey(card.provider, groupTitle, window.id),
         provider: card.provider,
         name: `${card.name} · ${groupTitle} · ${window.label}`,
+        service: card.name,
+        shortLabel: inferMetricShortLabel(window),
         tag,
         kind,
         remainingPercent: quantified ? Math.max(0, Math.min(100, Math.round(window.remainingPercent))) : undefined,
@@ -446,6 +871,8 @@ export function mountQuotaHud(controller: QuotaController): () => void {
           key,
           provider: card.provider,
           name: `${card.name} · 账户余额`,
+          service: card.name,
+          shortLabel: '余额',
           tag,
           kind: 'balance',
           amountText: formatBalanceAmount(card),
@@ -478,12 +905,39 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   }
 
   let activeIndex = 0
-  let intervalTimer: any = null
+  let intervalTimer: ReturnType<typeof setInterval> | null = null
 
-  function getStatusColor(rem: number): string {
-    if (rem <= 15) return '#B04A46' // 🔴 茜色
-    if (rem <= 35) return '#BA8137' // 🟡 缃黄
-    return '#3F7A63' // 🟢 竹青
+  function captureFocusTarget(): FocusTarget {
+    if (typeof document === 'undefined') return null
+    const active = document.activeElement
+    if (!active) return null
+    if (active === hudEl) return 'host'
+    if (typeof active.closest === 'function') {
+      if (active.closest('.dsh-hud-pause')) return 'pause'
+      if (active.closest('.dsh-hud-open-panel')) return 'panel'
+    }
+    return null
+  }
+
+  function restoreFocusTarget(target: FocusTarget): void {
+    if (target === null) return
+    if (target === 'host') {
+      hudEl.focus({ preventScroll: true })
+      return
+    }
+    const selector = target === 'pause' ? '.dsh-hud-pause' : '.dsh-hud-open-panel'
+    const el = hudEl.querySelector<HTMLElement>(selector)
+    el?.focus({ preventScroll: true })
+  }
+
+  function setHudAriaLabel(label: string): void {
+    hudEl.setAttribute('aria-label', label)
+  }
+
+  function pauseButtonHtml(): string {
+    const label = paused ? '继续轮播' : '暂停轮播'
+    const icon = paused ? PLAY_ICON : PAUSE_ICON
+    return `<button type="button" class="dsh-hud-icon-button dsh-hud-pause" aria-label="${label}" aria-pressed="${paused ? 'true' : 'false'}" title="${label}">${icon}</button>`
   }
 
   function render() {
@@ -497,50 +951,65 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     hudEl.style.display = 'flex'
 
     const metrics = getMetricsList(state.cards, state.config)
+    const focusTarget = captureFocusTarget()
 
-    // Calculate smart collision position for Popover
-    const isNearTop = pos.y < 200
-    const isNearRight = pos.x > window.innerWidth / 2
-    const popoverVClass = isNearTop ? 'pop-bottom' : 'pop-top'
-    const popoverHClass = isNearRight ? 'pop-right' : 'pop-left'
+    hudEl.classList.toggle('is-narrow', window.innerWidth < NARROW_BREAKPOINT)
+    const placement = computePopoverPlacement(pos, window.innerWidth)
+    const popoverClass = `dsh-hud-popover ${placement.vertical} ${placement.horizontal}`
 
     if (metrics.length === 0) {
       const hasMetricSelection = Array.isArray(state.config?.floatingHudMetrics)
       const emptyTitle = hasMetricSelection ? '未选择额度' : '未连接服务'
       const emptyHint = hasMetricSelection ? '请在设置中选择要显示的额度窗口' : '点击打开面板完成服务连接'
+      setHudAriaLabel(`额度监控：${emptyTitle}。按 Enter 展开提示`)
       hudEl.innerHTML = `
         <div class="dsh-hud-circle">
-          <svg class="dsh-hud-svg" viewBox="0 0 46 46">
-            <circle cx="23" cy="23" r="18" stroke="var(--dsw-alias-border-l1, rgba(0,0,0,0.1))" stroke-width="3" fill="none"/>
-          </svg>
+          ${neutralRingSvg()}
           <div class="dsh-hud-content">
             <span class="dsh-hud-percent">--</span>
             <span class="dsh-hud-tag">AI</span>
           </div>
-          <div class="dsh-hud-popover ${popoverVClass} ${popoverHClass}">
-            <div class="dsh-hud-popover-title"><span>AI 额度监控</span><span style="font-weight: normal; font-size: 10px; opacity: 0.7;">${emptyTitle}</span></div>
-            <div style="font-size: 11px; color: var(--dsw-alias-label-tertiary, #888);">${emptyHint}</div>
+        </div>
+        <div class="${popoverClass}" role="group" aria-label="额度状态">
+          <div class="dsh-hud-popover-title">
+            <span class="dsh-hud-popover-title-text">AI 额度监控</span>
+            <span class="dsh-hud-popover-count">${emptyTitle}</span>
           </div>
+          <div class="dsh-hud-popover-empty">${emptyHint}</div>
+          <button type="button" class="dsh-hud-popover-action dsh-hud-open-panel" aria-label="打开额度面板">打开面板</button>
         </div>
       `
+      restoreFocusTarget(focusTarget)
       return
     }
 
     if (activeIndex >= metrics.length) activeIndex = 0
     const current = metrics[activeIndex]!
     const quantified = isQuantifiedMetric(current)
+    const percent = quantified ? Math.round(current.remainingPercent!) : undefined
+    const exhausted = percent !== undefined && percent <= 0
+    const tone = percent !== undefined ? statusTone(percent) : undefined
 
-    const popoverRows = metrics.map(m => {
+    const ariaText = metricAriaText(current)
+    setHudAriaLabel(
+      isPinned
+        ? `额度监控：${ariaText}。已展开明细，按 Esc 收起`
+        : `额度监控：${ariaText}。按 Enter 展开明细`,
+    )
+
+    const popoverRows = metrics.map((m, index) => {
       const quantifiedRow = isQuantifiedMetric(m)
-      const color = quantifiedRow
-        ? getStatusColor(m.remainingPercent!)
-        : 'var(--dsw-alias-label-secondary, #57606a)'
+      const rowTone = quantifiedRow ? statusTone(m.remainingPercent!) : ''
+      const valueClass = rowTone === '' ? 'dsh-hud-popover-val' : `dsh-hud-popover-val is-${rowTone}`
+      const activeClass = index === activeIndex ? ' is-active' : ''
       // Card/group/window text is escaped once at the controller boundary; escaping again here
-      // would render visible entities (`&amp;`).
+      // would render visible entities (`&amp;`). Service name is ellipsised by CSS and the
+      // full `service · group · window` text stays available through `title`.
       return `
-        <div class="dsh-hud-popover-row">
-          <span class="dsh-hud-popover-name" title="${m.name}">${m.name}</span>
-          <span class="dsh-hud-popover-val" style="color: ${color};">${metricValueText(m)}</span>
+        <div class="dsh-hud-popover-row${activeClass}" title="${m.name}">
+          <span class="dsh-hud-popover-service" title="${m.name}">${m.service}</span>
+          <span class="dsh-hud-popover-metric">${m.shortLabel}</span>
+          <span class="${valueClass}">${metricValueText(m)}</span>
         </div>
       `
     }).join('')
@@ -552,67 +1021,76 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     if (quantified) {
       const radius = 18
       const circumference = 2 * Math.PI * radius
-      const offset = circumference - (current.remainingPercent! / 100) * circumference
-      const strokeColor = getStatusColor(current.remainingPercent!)
+      const offset = circumference - (percent! / 100) * circumference
       ringHtml = `
-        <svg class="dsh-hud-svg" viewBox="0 0 46 46">
-          <circle cx="23" cy="23" r="${radius}" stroke="var(--dsw-alias-border-l1, rgba(0,0,0,0.08))" stroke-width="3" fill="none"/>
-          <circle cx="23" cy="23" r="${radius}" stroke="${strokeColor}" stroke-width="3" fill="none"
-            stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" stroke-linecap="round"
-            style="transition: stroke-dashoffset 0.4s ease, stroke 0.3s ease;"/>
+        <svg class="dsh-hud-svg" viewBox="0 0 46 46" aria-hidden="true" focusable="false">
+          <circle class="dsh-hud-ring-track" cx="23" cy="23" r="${radius}"></circle>
+          <circle class="dsh-hud-ring-value is-${tone}" cx="23" cy="23" r="${radius}"
+            stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"></circle>
         </svg>
       `
-      centerHtml = `<span class="dsh-hud-percent">${Math.round(current.remainingPercent!)}%</span>`
+      centerHtml = `<span class="dsh-hud-percent${exhausted ? ' is-empty' : ''}">${percent}%</span>`
     } else if (current.kind === 'balance') {
-      ringHtml = `
-        <svg class="dsh-hud-svg" viewBox="0 0 46 46">
-          <circle cx="23" cy="23" r="18" stroke="var(--dsw-alias-border-l1, rgba(0,0,0,0.08))" stroke-width="3" fill="none"/>
-        </svg>
-      `
-      centerHtml = `<span class="dsh-hud-percent" style="font-size: 9.5px; font-weight: 700;">${current.amountText || '—'}</span>`
+      ringHtml = neutralRingSvg()
+      centerHtml = `<span class="dsh-hud-percent dsh-hud-percent-amount">${current.amountText || '—'}</span>`
     } else if (current.kind === 'liveness') {
-      centerHtml = `<span class="dsh-hud-percent" style="font-size: 10px;">✓</span>`
+      centerHtml = `<span class="dsh-hud-percent dsh-hud-percent-liveness">✓</span>`
     } else {
       centerHtml = `<span class="dsh-hud-percent">--</span>`
     }
 
     hudEl.innerHTML = `
-      <div class="dsh-hud-circle">
+      <div class="dsh-hud-circle${exhausted ? ' is-exhausted' : ''}">
         ${ringHtml}
         <div class="dsh-hud-content">
           ${centerHtml}
           <span class="dsh-hud-tag">${current.tag}</span>
         </div>
-        <div class="dsh-hud-popover ${popoverVClass} ${popoverHClass}">
-          <div class="dsh-hud-popover-title">
-            <span>AI 额度监控</span>
-            <span style="font-weight: normal; font-size: 10px; opacity: 0.7;">点击查看详情</span>
-          </div>
-          ${popoverRows}
+      </div>
+      <div class="${popoverClass}" role="group" aria-label="额度明细">
+        <div class="dsh-hud-popover-title">
+          <span class="dsh-hud-popover-title-text">AI 额度监控</span>
+          <span class="dsh-hud-popover-count">${activeIndex + 1}/${metrics.length}</span>
+          ${pauseButtonHtml()}
         </div>
+        ${popoverRows}
+        <button type="button" class="dsh-hud-popover-action dsh-hud-open-panel" aria-label="打开额度面板">打开面板</button>
       </div>
     `
+    restoreFocusTarget(focusTarget)
+  }
+
+  function shouldAdvanceCarousel(): boolean {
+    // Pause the 4.5s carousel while the tab/window is hidden, while the user reads
+    // the card, drags the ball, or when the OS asks for reduced motion.
+    if (typeof document !== 'undefined' && document.hidden) return false
+    if (prefersReducedMotion) return false
+    if (paused || isPinned || isHoverCardVisible || isDragging) return false
+    if (typeof document !== 'undefined' && document.activeElement === hudEl) return false
+    return true
   }
 
   intervalTimer = setInterval(() => {
-    // Pause the 4.5s carousel while the tab/window is hidden.
-    if (typeof document !== 'undefined' && document.hidden) return
-    if (isHovered || isDragging) return // Pause carousel on hover or dragging
+    if (!shouldAdvanceCarousel()) return
     const state = controller.getSnapshot()
     const metrics = getMetricsList(state.cards, state.config)
     if (metrics.length > 1) {
       activeIndex = (activeIndex + 1) % metrics.length
       render()
     }
-  }, 4500)
+  }, CAROUSEL_INTERVAL_MS)
 
   const unsubscribe = controller.subscribe(render)
   render()
 
   return () => {
-    if (intervalTimer) clearInterval(intervalTimer)
+    if (intervalTimer !== null) clearInterval(intervalTimer)
+    cancelHoverHide()
     unbindDragEndListeners()
     window.removeEventListener('resize', onWindowResize)
+    if (motionQuery && typeof motionQuery.removeEventListener === 'function') {
+      motionQuery.removeEventListener('change', onMotionPreferenceChange)
+    }
     unsubscribe()
     hudEl.remove()
     styleEl.remove()
