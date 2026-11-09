@@ -1,10 +1,10 @@
 # @francescoli/dsh-quota: DSH AI 额度与用量监控插件
 
-[![version](https://img.shields.io/badge/version-v0.4.2-blue.svg)](./package.json)
+[![version](https://img.shields.io/badge/version-v0.4.3-blue.svg)](./package.json)
 [![npm](https://img.shields.io/badge/npm-@francescoli/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francescoli/dsh-quota)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-> 当前版本：**v0.4.2**
+> 当前版本：**v0.4.3**
 
 专门为 **DeepSeek Harness (DSH)** 打造的全功能 AI 服务额度、余额与用量监控插件。集中监控并展示 **DeepSeek 官方平台**、**Cursor**、**Codex (ChatGPT)**、**Google Antigravity**、**GitHub Copilot**、**OpenAI Platform**、**Anthropic Claude**、**Kimi**、**智谱 GLM**、**MiniMax**、**阿里通义千问**、**火山方舟**、**OpenCode-Go** 及 **OneAPI / NewAPI** 兼容中转的实时剩余额度、用量、充值余额、消耗速率及重置周期。
 
@@ -39,7 +39,7 @@
 
 ---
 
-## 🆕 v0.4.2 更新要点
+## 🆕 v0.4.3 更新要点
 
 - **修复升级后插件同步失败**（`loaded without registering "@francescoli/dsh-quota"`）：客户端产物改为 IIFE 单模块，重复执行安全；构建加闸门、CI 加测试。
 - **额度数据不再造假**：新增 `quotaKind` 能力模型，余额类只显示金额、连通性类明确标注「仅连通性」、缺字段显示「—」而不是 0%/100%。
@@ -93,7 +93,7 @@ npm ci
 npm run typecheck    # tsc --noEmit（host 类型走 types/dsh-shims.d.ts）
 npm run build        # esbuild 产出 lib/index.js + lib/client.js（含 source map）
 npm test             # 类型检查 + legacy 套件 + node:test 全量用例
-npm run validate:release -- --tag v0.4.2
+npm run validate:release -- --tag v0.4.3
 ```
 
 ---
