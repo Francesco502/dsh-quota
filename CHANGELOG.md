@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-09
+
+### Fixed
+- **修复桌面版（Electron）中额度面板空白**：0.4.1 的接口守卫把页面 Origin 限制为 loopback，而桌面外壳从自定义协议 `dsh-app://` 加载界面，导致所有 `/api/dsh-quota/*` 请求被判定为跨站并返回 403。现在允许该桌面协议（并同步放行它上报的 `Sec-Fetch-Site`），Web 端行为不变。
+
 ## [0.4.1] - 2026-11-06
 
 ### Fixed

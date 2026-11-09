@@ -13,7 +13,9 @@ export interface Route {
  *  1. a required custom header — a cross-site page cannot attach it without a
  *     CORS preflight, and this server answers no preflight;
  *  2. loopback Host only — a DNS-rebinding page sends its own hostname here;
- *  3. same-origin Origin / Sec-Fetch-Site when the browser sends them;
+ *  3. same-origin Origin / Sec-Fetch-Site when the browser sends them —
+ *     the Electron desktop shell loads the app from `dsh-app://`, which is an
+ *     opaque-looking but trusted local origin, so that scheme is allow-listed;
  *  4. JSON content type on writes, so form/text posts cannot mutate config.
  *
  * `DSH_QUOTA_ALLOW_REMOTE_API=1` opts out of the loopback Host check for users
@@ -21,6 +23,9 @@ export interface Route {
  */
 const API_HEADER = 'x-dsh-quota'
 const MAX_BODY_BYTES = 256 * 1024
+
+/** Schemes the Harness desktop shell serves its own UI from (Electron custom scheme). */
+const TRUSTED_APP_SCHEMES = new Set(['dsh-app:'])
 
 function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
@@ -47,18 +52,23 @@ function checkGuard(req: any): GuardFailure | undefined {
   }
 
   const origin = req?.headers?.origin
+  let trustedAppOrigin = false
   if (typeof origin === 'string' && origin.length > 0 && origin !== 'null') {
     let originHost = ''
+    let originScheme = ''
     try {
-      originHost = new URL(origin).hostname
+      const parsed = new URL(origin)
+      originHost = parsed.hostname
+      originScheme = parsed.protocol
     } catch {
       return { status: 403, message: 'Origin 无效' }
     }
-    if (!isLoopbackHostname(originHost)) return { status: 403, message: '跨站请求被拒绝' }
+    if (TRUSTED_APP_SCHEMES.has(originScheme)) trustedAppOrigin = true
+    else if (!isLoopbackHostname(originHost)) return { status: 403, message: '跨站请求被拒绝' }
   }
 
   const site = req?.headers?.['sec-fetch-site']
-  if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') {
+  if (typeof site === 'string' && site !== 'same-origin' && site !== 'none' && !trustedAppOrigin) {
     return { status: 403, message: `跨站请求被拒绝 (Sec-Fetch-Site: ${site})` }
   }
 
