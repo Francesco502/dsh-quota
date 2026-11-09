@@ -1,6 +1,6 @@
 {
   "name": "@francescoli/dsh-quota",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "AI Quota and Token Usage Monitor for DeepSeek Harness (DeepSeek, SiliconFlow, OpenRouter, Cursor, Codex, Antigravity, Copilot, Kimi, GLM, Qwen, OpenCode)",
   "type": "module",
   "main": "lib/index.js",

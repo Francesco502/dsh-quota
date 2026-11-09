@@ -1,14 +1,14 @@
 /**
  * Client entry for the dsh-quota Web UI.
  *
- * Preferred path: official slots provide the sidebar footer shortcut and the
- * collapsed-rail alert badge, while the dashboard itself keeps the proven
- * overlay mount (it renders into the conversation column and takes over the
- * main area when opened). Hosts without the slots service fall back to the
- * previous DOM-injected sidebar entry.
+ * Preferred path: official slots register the sidebar panel entry and the main
+ * panel content, so the dashboard is a first-class shell panel rather than a
+ * conversation-column takeover. The footer shortcut and alert badge are kept
+ * for hosts that still show them; the legacy overlay only remains for hosts
+ * without the slots service.
  *
  * @package dsh-quota
- * @version 0.4.1
+ * @version 0.4.4
  */
 import { QuotaClientApi } from './api.ts'
 import { QuotaController } from './controller.ts'
@@ -59,13 +59,33 @@ function applyWithSlots(ctx: any, react: any): void {
   const api = new QuotaClientApi()
   const controller = new QuotaController(api)
   const t = registerQuotaLocale(ctx)
+  // Panel selection is a layout concern. Resolve it lazily on each use: at
+  // client-apply time the layout service may not have been registered yet, and
+  // `ctx.get` is the non-throwing probe that stays valid on hosts without it.
+  const selectPanel = (id: string): boolean => {
+    const layout = serviceOf(ctx, 'layout')
+    const select = layout?.selectPanel
+    if (typeof select !== 'function') return false
+    try {
+      select.call(layout, id)
+      return true
+    } catch (error) {
+      console.warn('[dsh-quota] panel selection failed:', (error as Error)?.message ?? error)
+      return false
+    }
+  }
 
-  const disposeSlots = registerQuotaSlots(ctx, { react, controller, t })
-  // The dashboard keeps the overlay mount: it is the same renderer users already
-  // run, so the official seats only change how the panel is reached. One broken
-  // mount must not tear down the seats that already registered.
-  const disposePanel = guardedMount('panel mount', () => mountPanel(controller))
-  const disposeHud = guardedMount('HUD mount', () => mountQuotaHud(controller))
+  const disposeSlots = registerQuotaSlots(ctx, { react, controller, t, selectPanel })
+  // The slot host owns the panel surface: `main` renders the dashboard and
+  // `sidebar.panellist` selects it. Mounting the legacy overlay as well would
+  // stack two scroll containers and leave the overlay hidden/inert.
+  const disposeHud = guardedMount('HUD mount', () =>
+    mountQuotaHud(controller, {
+      openPanel: () => {
+        if (!selectPanel(PANEL_ID)) controller.toggle()
+      },
+    }),
+  )
   // A host that exposes slots but rejected every seat still needs an entry point.
   const disposeLegacyEntry =
     disposeSlots === undefined ? guardedMount('legacy sidebar entry', () => mountQuotaSidebarEntry(controller)) : undefined
@@ -79,7 +99,6 @@ function applyWithSlots(ctx: any, react: any): void {
     } catch {
       /* host teardown races are not our problem */
     }
-    disposePanel?.()
     disposeHud?.()
     controller.destroy()
     applied = false

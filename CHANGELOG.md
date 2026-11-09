@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-09
+
+### Added
+- **一级导航「额度监控」**：注册根作用域 `sidebar.panellist`（`id: quota`, `order: 10`, locale label）与同名 `main` keyed slot，面板不再只存在于会话栏覆盖层；`ctx.layout.selectPanel('quota')` 负责选中，底部快捷入口与 HUD 的「打开面板」共用该路径。dsh-claude-style 的「更多 → 编辑侧栏…」会自动枚举并可勾选显隐。
+- **HUD 贴边微缩**：悬浮球停在视口左/右边缘时进入 `docked` 38px 微缩态（悬停/展开恢复 46px），此前 `.docked` 只有透明度、没有实际微缩。
+- **HUD 状态点**：usage 窗口低于阈值时在服务标签旁显示 5px 告警点，替代整环变色与整球脉冲。
+
+### Changed
+- **HUD 配色回归面板语义色**：圆环进度统一使用 `--q-brand`、轨道使用 `--q-track`，与监控面板一致；状态色（`--q-success/--q-warn/--q-error`）只用于小圆点与卡片内文字。深色主题下使用面板同款低饱和状态色。
+- **主面板渲染模式**：`renderQuotaApp(container, controller, { mode: 'overlay' | 'panel' })`；`panel` 模式使用 `position: relative; inset: auto; display: block; height: 100%; overflow-y: auto`，overlay 规则改为 `[data-dsh-quota-mode='overlay']` 限定。slot 模式不再挂载 `mountPanel` 覆盖层，legacy 分支保留。
+- **HUD 文字自适应**：百分比/金额/标签字号按 `--hud-size` 以 `clamp()` 缩放；中心标签宽度限制为球径 −12px，超长余额缩写为 `K/M/B`（如 `¥1234.56` → `¥1.2K`），其余超长文本省略号；46px 与 38px docked 状态、0%/100%/123%/9.99GB/中英混排均不溢出。
+
+### Fixed
+- **面板版本号硬编码**：`src/client/view.ts` 的版本标签由 `v0.4.1` 固定文本改为 `v${PLUGIN_VERSION}`，0.4.4 界面不再落后于 npm 包版本。
+- **layout 服务时序**：`ctx.layout` 改为在点击时通过 `serviceOf` 懒解析，避开 client apply 阶段 layout 尚未注册导致 `selectPanel` 为空的问题。
+
 ## [0.4.3] - 2026-11-09
 
 ### Fixed

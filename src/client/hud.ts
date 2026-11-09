@@ -48,6 +48,39 @@ function metricValueText(metric: HudMetric): string {
   return '未知'
 }
 
+function compactScaled(value: number): string {
+  const text = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1)
+  return text.replace(/\.0$/, '')
+}
+
+/**
+ * Keep the dial's centre label inside the ring. Percentages are already short;
+ * balance amounts can be arbitrary strings (`¥1234.56`, `9.99GB`, `余额 …`), so
+ * large plain numbers are scaled (K/M/B) and anything else is ellipsised. The
+ * CSS side caps the label width and also ellipsises as a last resort.
+ */
+export function compactHudAmount(text: string): string {
+  const raw = typeof text === 'string' ? text.trim() : ''
+  if (raw === '') return raw
+
+  const match = /^([^0-9+\-]*)([+\-]?\d[\d,]*(?:\.\d+)?)(.*)$/.exec(raw)
+  if (match !== null) {
+    const prefix = match[1] ?? ''
+    const digits = match[2] ?? ''
+    const suffix = match[3] ?? ''
+    const value = Number(digits.replace(/,/g, ''))
+    if (Number.isFinite(value) && suffix === '') {
+      const abs = Math.abs(value)
+      if (abs >= 1e9) return `${prefix}${compactScaled(value / 1e9)}B`
+      if (abs >= 1e6) return `${prefix}${compactScaled(value / 1e6)}M`
+      if (abs >= 1e3) return `${prefix}${compactScaled(value / 1e3)}K`
+    }
+  }
+
+  if (raw.length <= 8) return raw
+  return `${raw.slice(0, 7)}…`
+}
+
 /**
  * Condense a window into one of the six labels the popover row shows next to the
  * service name. `quotaKind` wins, then the declared `windowKind`, then the raw
@@ -137,6 +170,11 @@ function computePopoverPlacement(position: HudPosition, viewportWidth: number): 
   return { vertical, horizontal: roomRight >= roomLeft ? 'pop-left' : 'pop-right' }
 }
 
+/** True when the ball is parked against a viewport edge (the docked/micro state). */
+function isDockedPosition(position: HudPosition): boolean {
+  return position.x <= 24 || position.x + HUD_SIZE >= window.innerWidth - 24
+}
+
 function neutralRingSvg(): string {
   return `
     <svg class="dsh-hud-svg" viewBox="0 0 46 46" aria-hidden="true" focusable="false">
@@ -183,7 +221,16 @@ function savePausedState(paused: boolean): void {
   } catch {}
 }
 
-export function mountQuotaHud(controller: QuotaController): () => void {
+export interface HudMountOptions {
+  /**
+   * Slot hosts own panel selection. When provided, the ball click and the
+   * popover's "打开面板" action select the qualified main panel instead of
+   * toggling the legacy overlay state (which is not mounted in slot mode).
+   */
+  openPanel?: () => void
+}
+
+export function mountQuotaHud(controller: QuotaController, options: HudMountOptions = {}): () => void {
   const hudEl = document.createElement('div')
   hudEl.setAttribute('data-dsh-quota-hud', '')
   hudEl.setAttribute('role', 'button')
@@ -204,21 +251,27 @@ export function mountQuotaHud(controller: QuotaController): () => void {
   const styleEl = document.createElement('style')
   styleEl.textContent = `
     [data-dsh-quota-hud] {
-      --q-success: var(--dsw-alias-state-success-primary, #3F7A63);
-      --q-warn: var(--dsw-alias-state-warn-primary, #BA8137);
-      --q-error: var(--dsw-alias-state-error-primary, #B04A46);
+      /* Dashboard semantic palette: the dial is brand-coloured, status colour is
+         reserved for the small dot/label accents. Keep the tokens in sync with
+         the dashboard's --q-* block in view.ts. */
+      --q-brand: var(--dsw-alias-brand-primary, #0969da);
       --q-fg: var(--dsw-alias-label-primary, #1f2328);
       --q-fg-2: var(--dsw-alias-label-secondary, #57606a);
       --q-bg: var(--dsw-alias-bg-base, #fff);
       --q-border: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
       --q-track: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.14));
+      --q-success: #3F7A63;
+      --q-warn: #BA8137;
+      --q-error: #B04A46;
       /* The raw border token is a hairline; on dark surfaces it disappears.
          Mixing it toward the label colour keeps the dial ring legible in both themes. */
       --q-track-on-surface: color-mix(in srgb, var(--q-track) 70%, var(--q-fg) 30%);
       --q-shadow: color-mix(in srgb, #000 24%, transparent);
       --q-scrim: color-mix(in srgb, var(--q-fg) 9%, transparent);
-      --q-pulse-ring: color-mix(in srgb, var(--q-error) 45%, transparent);
       --q-card-width: 240px;
+      /* The circle shrinks while docked to an edge; every font size below scales
+         from this one variable, so the 46px and docked sizes stay proportional. */
+      --hud-size: 46px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -226,16 +279,19 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     }
     @media (prefers-color-scheme: dark) {
       [data-dsh-quota-hud] {
-        --q-bg: var(--dsw-alias-bg-base, #17191f);
+        --q-bg: var(--dsw-alias-bg-base, #17181b);
         --q-fg: var(--dsw-alias-label-primary, #e6edf3);
         --q-fg-2: var(--dsw-alias-label-secondary, #9aa4b2);
         --q-border: var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.18));
         --q-track: var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.3));
+        --q-success: #6fa78f;
+        --q-warn: #d0a25f;
+        --q-error: #cf827d;
       }
     }
-    @keyframes q-pulse {
-      0%, 100% { box-shadow: 0 0 0 0 var(--q-pulse-ring); opacity: 1; }
-      50% { box-shadow: 0 0 0 6px var(--q-pulse-ring); opacity: 0.82; }
+    @keyframes q-dot-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--q-error) 45%, transparent); }
+      50% { box-shadow: 0 0 0 3px transparent; }
     }
     @media (prefers-reduced-motion: reduce) {
       [data-dsh-quota-hud],
@@ -252,8 +308,8 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     }
     [data-dsh-quota-hud] .dsh-hud-circle {
       position: relative;
-      width: 46px;
-      height: 46px;
+      width: var(--hud-size);
+      height: var(--hud-size);
       border-radius: 50%;
       background: var(--q-bg);
       border: 1px solid var(--q-border);
@@ -263,27 +319,33 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       align-items: center;
       justify-content: center;
       overflow: visible;
-      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.2s ease;
+      transition: width 0.18s ease, height 0.18s ease, transform 0.15s ease, box-shadow 0.15s ease, opacity 0.2s ease;
     }
     [data-dsh-quota-hud] .dsh-hud-circle:hover {
       transform: scale(1.06);
       box-shadow: 0 6px 18px var(--q-shadow);
     }
     [data-dsh-quota-hud] .dsh-hud-circle.docked {
+      --hud-size: 38px;
       opacity: 0.72;
     }
-    [data-dsh-quota-hud] .dsh-hud-circle.docked:hover {
+    [data-dsh-quota-hud] .dsh-hud-circle.docked:hover,
+    [data-dsh-quota-hud].is-hovered .dsh-hud-circle.docked,
+    [data-dsh-quota-hud].is-open .dsh-hud-circle.docked {
+      --hud-size: 46px;
       opacity: 1;
+      transform: none;
     }
     [data-dsh-quota-hud] .dsh-hud-circle.is-exhausted {
-      border-color: var(--q-error);
-      animation: q-pulse 1.8s ease-in-out infinite;
+      /* A thin border is a small accent; the old full-ball pulse read as an
+         alarm and is replaced by the dot animation below. */
+      border-color: color-mix(in srgb, var(--q-error) 55%, var(--q-border));
     }
     [data-dsh-quota-hud] .dsh-hud-svg {
       position: absolute;
       inset: 0;
-      width: 46px;
-      height: 46px;
+      width: 100%;
+      height: 100%;
       transform: rotate(-90deg);
       pointer-events: none;
     }
@@ -294,24 +356,32 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     }
     [data-dsh-quota-hud] .dsh-hud-ring-value {
       fill: none;
+      stroke: var(--q-brand);
       stroke-width: 3;
       stroke-linecap: round;
       transition: stroke-dashoffset 0.4s ease, stroke 0.3s ease;
     }
-    [data-dsh-quota-hud] .dsh-hud-ring-value.is-ok { stroke: var(--q-success); }
-    [data-dsh-quota-hud] .dsh-hud-ring-value.is-warn { stroke: var(--q-warn); }
-    [data-dsh-quota-hud] .dsh-hud-ring-value.is-error { stroke: var(--q-error); }
     [data-dsh-quota-hud] .dsh-hud-content {
       position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
+      width: 100%;
       line-height: 1;
       pointer-events: none;
     }
     [data-dsh-quota-hud] .dsh-hud-percent {
-      font-size: 11px;
+      display: block;
+      width: calc(var(--hud-size) - 12px);
+      margin: 0 auto;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      /* Percentage, amount and tag scale with the ball diameter; the fixed
+         ceilings keep the 46px ball at the historical type size. */
+      font-size: clamp(7.5px, calc(var(--hud-size) * 0.232), 11px);
       font-weight: 700;
       color: var(--q-fg);
       letter-spacing: -0.2px;
@@ -321,18 +391,36 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       color: var(--q-error);
     }
     [data-dsh-quota-hud] .dsh-hud-percent-amount {
-      font-size: 9.5px;
+      font-size: clamp(6.5px, calc(var(--hud-size) * 0.192), 9.3px);
     }
     [data-dsh-quota-hud] .dsh-hud-percent-liveness {
-      font-size: 10px;
+      font-size: clamp(8px, calc(var(--hud-size) * 0.217), 10px);
     }
     [data-dsh-quota-hud] .dsh-hud-tag {
-      font-size: 8.5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      max-width: calc(var(--hud-size) - 12px);
+      overflow: hidden;
+      white-space: nowrap;
+      font-size: clamp(6.5px, calc(var(--hud-size) * 0.185), 8.5px);
       font-weight: 600;
       color: var(--q-fg-2);
       margin-top: 1.5px;
       text-transform: uppercase;
       letter-spacing: 0.2px;
+    }
+    [data-dsh-quota-hud] .dsh-hud-status-dot {
+      flex: none;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--q-warn);
+    }
+    [data-dsh-quota-hud] .dsh-hud-status-dot.is-warn { background: var(--q-warn); }
+    [data-dsh-quota-hud] .dsh-hud-status-dot.is-error {
+      background: var(--q-error);
+      animation: q-dot-pulse 1.8s ease-in-out infinite;
     }
     [data-dsh-quota-hud] .dsh-hud-popover {
       position: absolute;
@@ -457,10 +545,12 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     }
     [data-dsh-quota-hud] .dsh-hud-popover-val {
       flex: none;
+      color: var(--q-fg);
       font-weight: 700;
       font-variant-numeric: tabular-nums;
     }
-    [data-dsh-quota-hud] .dsh-hud-popover-val.is-ok { color: var(--q-success); }
+    /* Status colour is a small text accent inside the card, never the whole dial. */
+    [data-dsh-quota-hud] .dsh-hud-popover-val.is-ok { color: var(--q-fg); }
     [data-dsh-quota-hud] .dsh-hud-popover-val.is-warn { color: var(--q-warn); }
     [data-dsh-quota-hud] .dsh-hud-popover-val.is-error { color: var(--q-error); }
     [data-dsh-quota-hud] .dsh-hud-popover-empty {
@@ -600,7 +690,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       // instead of jumping straight into the panel. The card's footer still
       // reaches the panel, and desktop keeps its historical tap-to-open behaviour.
       if (lastInteractionWasTouch) setPinned(!isPinned)
-      else controller.toggle()
+      else openDashboard()
       return
     }
 
@@ -685,6 +775,20 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     render()
   }
 
+  // The legacy overlay path toggles controller state; slot hosts select the
+  // registered main panel through layout. Keep the fallback in one place.
+  function openDashboard(): void {
+    if (typeof options.openPanel === 'function') {
+      try {
+        options.openPanel()
+      } catch (error) {
+        console.warn('[dsh-quota] panel selection failed:', (error as Error)?.message ?? error)
+      }
+      return
+    }
+    controller.toggle()
+  }
+
   function onHudClick(event: MouseEvent): void {
     const target = event.target as Element | null
     if (!target || typeof target.closest !== 'function') return
@@ -699,7 +803,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       event.preventDefault()
       event.stopPropagation()
       setPinned(false)
-      controller.toggle()
+      openDashboard()
     }
   }
 
@@ -952,6 +1056,8 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
     const metrics = getMetricsList(state.cards, state.config)
     const focusTarget = captureFocusTarget()
+    const docked = isDockedPosition(pos)
+    const circleClass = `dsh-hud-circle${docked ? ' docked' : ''}`
 
     hudEl.classList.toggle('is-narrow', window.innerWidth < NARROW_BREAKPOINT)
     const placement = computePopoverPlacement(pos, window.innerWidth)
@@ -963,7 +1069,7 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       const emptyHint = hasMetricSelection ? '请在设置中选择要显示的额度窗口' : '点击打开面板完成服务连接'
       setHudAriaLabel(`额度监控：${emptyTitle}。按 Enter 展开提示`)
       hudEl.innerHTML = `
-        <div class="dsh-hud-circle">
+        <div class="${circleClass}">
           ${neutralRingSvg()}
           <div class="dsh-hud-content">
             <span class="dsh-hud-percent">--</span>
@@ -1016,8 +1122,12 @@ export function mountQuotaHud(controller: QuotaController): () => void {
 
     // A percentage ring is only legitimate for `usage` windows; balance/liveness/
     // unknown render a neutral dial instead of a fabricated full/empty ring.
+    // The ring itself always uses the dashboard brand colour; status is a small
+    // dot next to the provider tag (and the popover value text), never a
+    // whole-ball green/yellow/red flood.
     let ringHtml = ''
     let centerHtml = ''
+    let statusDotHtml = ''
     if (quantified) {
       const radius = 18
       const circumference = 2 * Math.PI * radius
@@ -1025,14 +1135,17 @@ export function mountQuotaHud(controller: QuotaController): () => void {
       ringHtml = `
         <svg class="dsh-hud-svg" viewBox="0 0 46 46" aria-hidden="true" focusable="false">
           <circle class="dsh-hud-ring-track" cx="23" cy="23" r="${radius}"></circle>
-          <circle class="dsh-hud-ring-value is-${tone}" cx="23" cy="23" r="${radius}"
+          <circle class="dsh-hud-ring-value" cx="23" cy="23" r="${radius}"
             stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"></circle>
         </svg>
       `
       centerHtml = `<span class="dsh-hud-percent${exhausted ? ' is-empty' : ''}">${percent}%</span>`
+      if (tone === 'warn' || tone === 'error') {
+        statusDotHtml = `<span class="dsh-hud-status-dot is-${tone}" aria-hidden="true"></span>`
+      }
     } else if (current.kind === 'balance') {
       ringHtml = neutralRingSvg()
-      centerHtml = `<span class="dsh-hud-percent dsh-hud-percent-amount">${current.amountText || '—'}</span>`
+      centerHtml = `<span class="dsh-hud-percent dsh-hud-percent-amount">${compactHudAmount(current.amountText || '—')}</span>`
     } else if (current.kind === 'liveness') {
       centerHtml = `<span class="dsh-hud-percent dsh-hud-percent-liveness">✓</span>`
     } else {
@@ -1040,11 +1153,11 @@ export function mountQuotaHud(controller: QuotaController): () => void {
     }
 
     hudEl.innerHTML = `
-      <div class="dsh-hud-circle${exhausted ? ' is-exhausted' : ''}">
+      <div class="${circleClass}${exhausted ? ' is-exhausted' : ''}">
         ${ringHtml}
         <div class="dsh-hud-content">
           ${centerHtml}
-          <span class="dsh-hud-tag">${current.tag}</span>
+          <span class="dsh-hud-tag">${current.tag}${statusDotHtml}</span>
         </div>
       </div>
       <div class="${popoverClass}" role="group" aria-label="额度明细">

@@ -1,11 +1,13 @@
 /**
  * Slot wiring tests. The host renders these seats, so the contract pinned here is
- * the registration shape: seat names, ids and the graceful fallback when a host
- * exposes no slots service.
+ * the registration shape: seat names, ids, main-panel key and the graceful
+ * fallback when a host exposes no slots service.
  *
- * The dashboard itself keeps the overlay mount (a main-panel seat was evaluated
- * and rejected: the host kept its container hidden, so a panellist entry would
- * open a blank area). The seats we ship are the footer shortcut and the badge.
+ * 0.4.4 promotes the dashboard from the conversation-column overlay to a
+ * first-class panel: `sidebar.panellist` supplies the navigation row and the
+ * keyed `main` seat supplies the content. The footer shortcut remains for hosts
+ * that still render it (dsh-claude-style hides it), and panel selection goes
+ * through `ctx.layout.selectPanel`.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -33,6 +35,10 @@ function fakeController() {
     close() {
       this.closed += 1
       this.panelOpen = false
+    },
+    toggle() {
+      if (this.panelOpen) this.close()
+      else this.open()
     },
     getSnapshot() {
       return { alarms: [], panelOpen: this.panelOpen }
@@ -66,7 +72,7 @@ test('does nothing when the host exposes no slots service', () => {
   assert.equal(dispose, undefined)
 })
 
-test('registers the footer shortcut and the alert badge', () => {
+test('registers the global panel row, main content, footer shortcut and alert badge', () => {
   const { slots, registrations } = captureSlots()
   const dispose = registerQuotaSlots(
     { slots },
@@ -75,24 +81,73 @@ test('registers the footer shortcut and the alert badge', () => {
 
   assert.deepEqual(
     registrations.map((row) => row.spec.name),
-    ['sidebar.toggle.badge', 'sidebar.footer.action'],
+    ['sidebar.panellist', 'main', 'sidebar.toggle.badge', 'sidebar.footer.action'],
   )
+
+  const panel = registrations.find((row) => row.spec.name === 'sidebar.panellist')
+  assert.equal(panel.spec.id, PANEL_ID)
+  assert.equal(panel.spec.order, 10)
+  assert.equal(panel.spec.locale, LOCALE_NS)
+  assert.equal(panel.spec.label(), 'footer.open')
+
+  const main = registrations.find((row) => row.spec.name === 'main')
+  assert.equal(main.spec.key, PANEL_ID)
+
   const footer = registrations.find((row) => row.spec.name === 'sidebar.footer.action')
   assert.equal(footer.spec.id, 'dsh-quota-footer')
   assert.equal(footer.spec.locale, LOCALE_NS)
   assert.equal(typeof dispose, 'function')
 })
 
-test('the footer shortcut toggles the overlay panel', () => {
+test('the panel icon reuses the gauge glyph at the host-provided size', () => {
+  const { slots, registrations } = captureSlots()
+  registerQuotaSlots({ slots }, { react: fakeReact(), controller: fakeController(), t: (key) => String(key) })
+  const icon = registrations.find((row) => row.spec.name === 'sidebar.panellist').component
+  const tree = icon({ size: 20 })
+  assert.equal(tree.type, 'svg')
+  assert.equal(tree.props.width, 20)
+  assert.equal(tree.props.height, 20)
+})
+
+test('the main panel renders the dashboard host div', () => {
+  const { slots, registrations } = captureSlots()
+  registerQuotaSlots({ slots }, { react: fakeReact(), controller: fakeController(), t: (key) => String(key) })
+  const panel = registrations.find((row) => row.spec.name === 'main').component
+  const tree = panel()
+  assert.equal(tree.type, 'div')
+  assert.equal(tree.props.className, 'dsh-quota-slot-panel')
+  assert.ok(tree.props.ref && typeof tree.props.ref === 'object')
+})
+
+test('the footer shortcut selects the registered panel in slot mode', () => {
+  const { slots, registrations } = captureSlots()
+  const controller = fakeController()
+  const selected = []
+  registerQuotaSlots(
+    { slots },
+    {
+      react: fakeReact(),
+      controller,
+      t: (key) => String(key),
+      selectPanel: (id) => selected.push(id),
+    },
+  )
+
+  const footer = registrations.find((row) => row.spec.name === 'sidebar.footer.action').component
+  footer({ wide: true }).props.onClick()
+  assert.deepEqual(selected, [PANEL_ID])
+  assert.equal(controller.opened, 0, 'slot mode must not toggle the legacy overlay')
+})
+
+test('the footer shortcut keeps the legacy overlay toggle when no layout service exists', () => {
   const { slots, registrations } = captureSlots()
   const controller = fakeController()
   registerQuotaSlots({ slots }, { react: fakeReact(), controller, t: (key) => String(key) })
 
   const footer = registrations.find((row) => row.spec.name === 'sidebar.footer.action').component
-  const tree = footer({ wide: true })
-  tree.props.onClick()
+  footer({ wide: true }).props.onClick()
   assert.equal(controller.opened, 1)
-  tree.props.onClick()
+  footer({ wide: true }).props.onClick()
   assert.equal(controller.closed, 1)
 })
 
@@ -126,7 +181,10 @@ test('disposer releases every registration', () => {
   const { slots, disposed } = captureSlots()
   const dispose = registerQuotaSlots({ slots }, { react: fakeReact(), controller: fakeController(), t: (key) => String(key) })
   dispose()
-  assert.deepEqual(disposed.sort(), ['sidebar.footer.action', 'sidebar.toggle.badge'].sort())
+  assert.deepEqual(
+    disposed.sort(),
+    ['sidebar.panellist', 'main', 'sidebar.toggle.badge', 'sidebar.footer.action'].sort(),
+  )
 })
 
 test('locale registers both baseline dictionaries and returns a bound translator', () => {

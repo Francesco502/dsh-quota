@@ -1,7 +1,7 @@
 /**
  * Host loader entry for dsh-quota plugin.
  * @package dsh-quota
- * @version 0.4.1
+ * @version 0.4.4
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'

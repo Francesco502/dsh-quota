@@ -2,8 +2,8 @@
 /**
  * Release gate for @francescoli/dsh-quota (cross-platform, no PowerShell needed).
  *
- * Usage: npm run validate:release -- --tag v0.4.1
- *        GITHUB_REF_NAME=v0.4.1 node scripts/validate-release.mjs   (CI)
+ * Usage: npm run validate:release -- --tag v0.4.4
+ *        GITHUB_REF_NAME=v0.4.4 node scripts/validate-release.mjs   (CI)
  */
 import { readFileSync, existsSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'

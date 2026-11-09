@@ -1,6 +1,7 @@
 import type { QuotaController } from './controller.ts'
 import type { AuthCardItem, QuotaConfig, MetricWindow, ProviderCategory, QuotaSparklinePoint, AccountConfigItem, CustomCompatibleEndpoint } from './api.ts'
 import { makeHudMetricKey, isQuantified, windowQuotaKind } from './api.ts'
+import { PLUGIN_VERSION } from '../core/types.ts'
 
 interface ProviderMeta {
   id: string
@@ -669,11 +670,26 @@ function getAvailableHudMetricsForTarget(target: DrawerTarget, cards: AuthCardIt
   ]
 }
 
-export function renderQuotaApp(container: HTMLElement, controller: QuotaController): () => void {
+export interface QuotaViewOptions {
+  /**
+   * `overlay` keeps the legacy conversation-column takeover; `panel` renders
+   * into the host's `main` keyed slot and is visible whenever the host selects
+   * the panel, so it must never depend on `panelOpen` or the active attribute.
+   */
+  mode?: 'overlay' | 'panel'
+}
+
+export function renderQuotaApp(
+  container: HTMLElement,
+  controller: QuotaController,
+  options: QuotaViewOptions = {},
+): () => void {
+  const mode = options.mode === 'panel' ? 'panel' : 'overlay'
   // Both mount paths (legacy conversation overlay and the official slot host)
   // need the view marker: the shared stylesheet and the scroll container rules
-  // key off it.
+  // key off it. The mode attribute scopes the positioning rules below.
   container.setAttribute('data-dsh-quota-view', '')
+  container.setAttribute('data-dsh-quota-mode', mode)
   container.setAttribute('data-dsh-plugin', 'quota')
 
   const styleEl = document.createElement('style')
@@ -682,23 +698,36 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
       position: relative;
     }
     [data-dsh-quota-view] {
-      position: absolute;
-      inset: 0;
-      display: none;
-      z-index: 60;
       background: var(--dsw-alias-bg-base, #ffffff);
       color: var(--dsw-alias-label-primary, var(--q-fg));
-      overflow-y: auto;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
       text-rendering: optimizeLegibility;
     }
-    html[data-dsh-quota-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-dsh-quota-view] {
+    [data-dsh-quota-view][data-dsh-quota-mode='overlay'] {
+      position: absolute;
+      inset: 0;
+      display: none;
+      z-index: 60;
+      overflow-y: auto;
+    }
+    [data-dsh-quota-view][data-dsh-quota-mode='panel'] {
+      position: relative;
+      inset: auto;
+      display: block;
+      height: 100%;
+      overflow-y: auto;
+    }
+    .dsh-quota-slot-panel {
+      height: 100%;
+      min-height: 0;
+    }
+    html[data-dsh-quota-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-dsh-quota-view][data-dsh-quota-mode='overlay'] {
       display: block;
     }
-    html[data-dsh-quota-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane='conversation'] > :not([data-dsh-quota-view]),
-    html[data-dsh-quota-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*='centerCol'] > :not([data-dsh-quota-view]) {
+    html[data-dsh-quota-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane='conversation'] > :not([data-dsh-quota-mode='overlay']),
+    html[data-dsh-quota-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*='centerCol'] > :not([data-dsh-quota-mode='overlay']) {
       display: none !important;
     }
 
@@ -2094,7 +2123,9 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
 
   function update() {
     const state = controller.getSnapshot()
-    if (!state.panelOpen) return
+    // The overlay only exists while the legacy panel state is open; the host's
+    // main slot has no such state and must render as soon as React mounts it.
+    if (mode === 'overlay' && !state.panelOpen) return
 
     // Prevent background polling from destroying active modal and wiping user input
     const modalAlreadyRendered = container.querySelector('#dsh-details-modal-overlay') || container.querySelector('#dsh-add-service-modal-overlay')
@@ -2738,7 +2769,7 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         <div class="quota-header">
           <div class="quota-title">
             <span>AI 额度监控</span>
-            <span class="quota-version-tag">v0.4.1</span>
+            <span class="quota-version-tag">v${PLUGIN_VERSION}</span>
             <span class="quota-updated-tag${dataIsStale ? ' is-stale' : ''}" role="status"
               title="${dataIsStale ? '数据超过两个刷新周期未更新，可能已过期' : '数据最后更新时间'}">${lastUpdatedLabel}${dataIsStale ? ' · 可能已过期' : ''}</span>
             <span class="quota-refresh-interval" data-goto-prefs role="button" tabindex="0" title="前往偏好设置">每 ${headerRefreshLabel}刷新</span>

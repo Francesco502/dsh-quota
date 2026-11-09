@@ -34,7 +34,7 @@ import {
   DEFAULT_PROVIDER_ORDER,
 } from '../lib/index.js'
 
-console.log('Running dsh-quota v0.4.1 test suite...')
+console.log('Running dsh-quota v0.4.4 test suite...')
 
 // 1. Percentage calculation
 const calcPercent = (used, total) => {
@@ -183,6 +183,11 @@ assert.ok(clientBundle.includes('btn-import-config'), 'client.js must include bt
 assert.ok(clientBundle.includes('siliconflow'), 'client.js must include siliconflow')
 assert.ok(clientBundle.includes('openrouter'), 'client.js must include openrouter')
 assert.ok(clientBundle.includes('M3.49 13.26'), 'client.js must include official IconGaugeOutline16')
+// 0.4.4: official navigation + main panel, and the version label is no longer hardcoded.
+assert.ok(clientBundle.includes('sidebar.panellist'), 'client.js must register the sidebar panel row')
+assert.ok(clientBundle.includes('dsh-quota-slot-panel'), 'client.js must render the main panel host div')
+assert.ok(clientBundle.includes('data-dsh-quota-mode'), 'client.js must distinguish overlay and panel modes')
+assert.ok(clientBundle.includes('0.4.4'), 'client.js must carry PLUGIN_VERSION 0.4.4')
 assert.ok(!clientBundle.includes('dshQuotaPulse'), 'client.js must not include blurry dshQuotaPulse badge')
 assert.ok(!clientBundle.includes('sort-list-header'), 'client.js must not include redundant sort-list-header')
 assert.ok(!clientBundle.includes('btn-move-up'), 'client.js must not include explicit arrow move buttons')
@@ -495,4 +500,4 @@ try {
   await new Promise((resolve) => testServer.close(resolve))
 }
 
-console.log('🎉 All dsh-quota v0.4.1 tests passed successfully!')
+console.log('🎉 All dsh-quota v0.4.4 tests passed successfully!')

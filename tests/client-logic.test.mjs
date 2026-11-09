@@ -18,6 +18,7 @@ import {
   makeHudMetricKey,
 } from '../src/client/api.ts'
 import { formatWindowSubtitle, formatClockTime } from '../src/client/view.ts'
+import { compactHudAmount } from '../src/client/hud.ts'
 import { alarmNotificationKey, formatErrorForUi } from '../src/client/controller.ts'
 
 test('resolveApiBase prefers the desktop transport base', () => {
@@ -230,6 +231,29 @@ test('alarmNotificationKey is stable per instance/level/window', () => {
 test('HUD metric keys remain distinct for same-named groups', () => {
   assert.equal(makeHudMetricKey('deepseek', 'Balance', 'deepseek'), 'deepseek::Balance::deepseek')
   assert.equal(makeHudMetricKey('custom_api', 'a::b', 'w'), 'custom_api::a%3A%3Ab::w')
+})
+
+test('HUD centre labels keep short values and abbreviate long amounts', () => {
+  // Percentages must never be rewritten: 0% / 100% / a legacy 123% stay intact.
+  assert.equal(compactHudAmount('0%'), '0%')
+  assert.equal(compactHudAmount('100%'), '100%')
+  assert.equal(compactHudAmount('123%'), '123%')
+
+  // Short amounts, including unit suffixes and mixed zh/en text, stay readable.
+  assert.equal(compactHudAmount('9.99GB'), '9.99GB')
+  assert.equal(compactHudAmount('¥9.99'), '¥9.99')
+  assert.equal(compactHudAmount('余额9.99'), '余额9.99')
+
+  // Long money is scaled so the 46px/docked dial never clips the label.
+  assert.equal(compactHudAmount('¥1234.56'), '¥1.2K')
+  assert.equal(compactHudAmount('¥12,345.67'), '¥12.3K')
+  assert.equal(compactHudAmount('$1234567.89'), '$1.2M')
+
+  // Non-numeric overflow is ellipsised rather than overflowing the ring.
+  const mixed = compactHudAmount('9.99GB 余额')
+  assert.ok(mixed.length <= 8, `mixed label should be compacted, got ${mixed}`)
+  assert.ok(mixed.endsWith('…'))
+  assert.equal(compactHudAmount(''), '')
 })
 
 test('formatErrorForUi always yields readable text', () => {

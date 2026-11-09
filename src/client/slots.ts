@@ -6,10 +6,10 @@
  * the shell's layout/theme/accessibility for free without rewriting the view.
  *
  * Seats used:
- *  - `main`                  the dashboard as a first-class main panel (`quota`)
- *  - `sidebar.panellist`     the global panel icon (owned by the sidebar)
+ *  - `sidebar.panellist`     first-class global panel row (`quota`)
+ *  - `main`                  the dashboard as the main panel (`key: quota`)
  *  - `sidebar.toggle.badge`  alert badge on the collapsed rail
- *  - `sidebar.footer.action` quick jump next to Settings
+ *  - `sidebar.footer.action` quick jump next to Settings (legacy hosts)
  *
  * Every host call is best-effort: a missing seat must degrade, never throw.
  */
@@ -25,7 +25,7 @@ export interface SlotWiring {
   controller: QuotaController
   t: QuotaTranslate
   /** Selects a main panel; when absent the footer shortcut is not registered. */
-  selectPanel?: (id: string) => void
+  selectPanel?: (id: string) => boolean | void
 }
 
 const ACTIVE_ATTR = 'data-dsh-quota-active'
@@ -37,7 +37,7 @@ function ensureSlotStyles(): void {
   style.id = 'dsh-quota-slot-style'
   style.textContent = `
     .dsh-quota-slot-root { position: relative; height: 100%; min-height: 0; overflow: hidden; }
-    .dsh-quota-slot-panel { height: 100%; }
+    .dsh-quota-slot-panel { height: 100%; min-height: 0; }
     .dsh-quota-slot-badge {
       display: inline-flex; align-items: center; justify-content: center;
       min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
@@ -159,6 +159,38 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
     )
   }
 
+  // ---- sidebar panel entry ----------------------------------------------
+  // The host hands the icon a `size` prop; reuse the footer gauge so the two
+  // surfaces share one visual identity.
+  const QuotaPanelIcon = (props: { size?: number }) =>
+    gaugeIcon(react, typeof props?.size === 'number' ? props.size : 16, false)
+
+  // ---- main panel content ------------------------------------------------
+  // The host mounts this component only while the `quota` panel is selected.
+  // renderQuotaApp owns the DOM inside the wrapper; React only owns the host
+  // div, so controller-driven repaints never fight React's tree.
+  const QuotaMainPanel = () => {
+    const hostRef = react.useRef(null)
+    react.useEffect(() => {
+      const host = hostRef.current
+      if (host === null || host === undefined) return
+      let dispose: (() => void) | undefined
+      try {
+        dispose = renderQuotaApp(host, controller, { mode: 'panel' })
+      } catch (error) {
+        console.warn('[dsh-quota] panel render failed:', (error as Error)?.message ?? error)
+      }
+      return () => {
+        try {
+          dispose?.()
+        } catch {
+          /* host teardown races are not our problem */
+        }
+      }
+    }, [])
+    return react.createElement('div', { ref: hostRef, className: 'dsh-quota-slot-panel' })
+  }
+
   // ---- sidebar footer shortcut -----------------------------------------
   const QuotaFooterAction = (props: { wide?: boolean }) => {
     const wide = props?.wide !== false
@@ -172,6 +204,12 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
         'aria-label': t('footer.open'),
         onClick: () => {
           try {
+            // Slot hosts own panel selection; only the legacy overlay keeps the
+            // controller's open/close state.
+            if (typeof wiring.selectPanel === 'function') {
+              wiring.selectPanel(PANEL_ID)
+              return
+            }
             const open = controller.getSnapshot().panelOpen
             if (open) controller.close()
             else controller.open()
@@ -185,6 +223,8 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
     )
   }
 
+  register('sidebar.panellist', { id: PANEL_ID, order: 10, label: () => t('footer.open') }, QuotaPanelIcon)
+  register('main', { key: PANEL_ID }, QuotaMainPanel)
   register('sidebar.toggle.badge', {}, QuotaBadge)
   register('sidebar.footer.action', { id: 'dsh-quota-footer', order: 20 }, QuotaFooterAction)
 
