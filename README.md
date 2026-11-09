@@ -88,9 +88,10 @@ dsh plugin --profile web add github:Francesco502/dsh-quota
 ## 🛠️ 构建与发布验证
 
 ```bash
-npm run build
-npm test
-npm run build && npm test
+npm ci
+npm run typecheck    # tsc --noEmit（host 类型走 types/dsh-shims.d.ts）
+npm run build        # esbuild 产出 lib/index.js + lib/client.js（含 source map）
+npm test             # 类型检查 + legacy 套件 + node:test 全量用例
 npm run validate:release -- --tag v0.4.1
 ```
 

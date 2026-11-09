@@ -536,9 +536,9 @@ export class QuotaManager {
       providerOrder: unmasked.providerOrder !== undefined ? unmasked.providerOrder : current.providerOrder,
       customNames: (() => {
         if (unmasked.customNames === undefined) return current.customNames
-        const combined = { ...(current.customNames || {}), ...unmasked.customNames }
+        const combined: Record<string, string> = { ...(current.customNames || {}), ...unmasked.customNames }
         for (const [k, v] of Object.entries(combined)) {
-          if (!v || !v.trim()) delete (combined as any)[k]
+          if (typeof v !== 'string' || v.trim().length === 0) delete combined[k]
         }
         return combined
       })(),

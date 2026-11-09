@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **密钥面收口**：`getSafeConfig` 的掩码字段清单补齐 `sessionKey`，掩码不再回显真实首尾字符；`baseUrl`/`provider` 变更时不再回填旧密钥。
 
 ### Added
+- **类型检查接入 `tsc --noEmit`**：`types/dsh-shims.d.ts` 为四个 host 包（cordis / dsh-agent / dsh-system-prompt / dsh-host-webserver）提供最小类型面，`tsconfig.json` 以 strict 模式检查 `src/**`；`npm test` 与 CI/release 门禁都会先跑 `npm run typecheck`。修复了 8 处类型错误：`AbortSignal | null` 合并、`DrawerTarget` 闭包收窄、custom endpoint → `AccountConfigItem` 映射、`flushSync` 可见性、`customNames` 键入等。
 - **官方 slots 接入**：`sidebar.footer.action` 提供侧边栏底部「额度监控」快捷入口、`sidebar.toggle.badge` 提供折叠栏告警角标，壳层文案走 `locale` 命名空间；宿主不提供 slots 时回退到原有 DOM 注入入口。
   - 说明：`main` 主面板与 `sidebar.panellist` 已评估并放弃——在 0.2.2-rc.1 上注册成功但宿主始终把面板容器保持 `display:none`（`selectPanel` 返回成功、组件已挂载但不显示），发布一个点开空白的入口比保留覆盖层方案更糟，因此内容区继续使用已验证的覆盖层渲染。
 - **i18n**：注册 `dsh-quota` 命名空间（zh/en），壳层文案（底部入口/角标）随宿主语言切换。
@@ -32,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **构建**：host/client 产物均输出 source map（宿主会读取 `client.js.map`），`scripts/validate-release.mjs` 提供跨平台发布校验（不再依赖 PowerShell）。
 
 ### Changed
-- `npm test` 现为 `node tests/run.mjs && node --test tests/*.test.mjs`；`prepack` 仍会重建产物。
+- `npm test` 现为 `npm run typecheck && node tests/run.mjs && node --test tests/*.test.mjs`；`prepack` 仍会重建产物。
 - 新增 `engines.dsh` 与 `engines.node` 声明。
 - 移除废弃文件 `test-run.ts`。
 

@@ -459,7 +459,8 @@ export class QuotaHistoryManager {
     return this.flushPromise
   }
 
-  private flushSync(): boolean {
+  /** Public so the shared process-exit hook can flush this instance. */
+  flushSync(): boolean {
     if (this.flushTimer !== undefined) {
       clearTimeout(this.flushTimer)
       this.flushTimer = undefined

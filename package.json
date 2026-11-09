@@ -36,8 +36,9 @@
     "build:client": "node bundle-client.mjs",
     "build": "node bundle-host.mjs && node bundle-client.mjs",
     "prepack": "node bundle-host.mjs && node bundle-client.mjs",
-    "test": "node tests/run.mjs && node --test tests/*.test.mjs",
-    "validate:release": "node scripts/validate-release.mjs"
+    "test": "npm run typecheck && node tests/run.mjs && node --test tests/*.test.mjs",
+    "validate:release": "node scripts/validate-release.mjs",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "keywords": [
     "dsh",
@@ -65,6 +66,8 @@
     "dsh": ">=0.2.2-rc.1"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
   }
 }

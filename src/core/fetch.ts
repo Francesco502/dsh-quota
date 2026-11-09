@@ -34,7 +34,7 @@ function makeTimeoutSignal(timeoutMs: number): AbortSignal | undefined {
   return undefined
 }
 
-function combineSignals(timeoutMs: number, explicitSignal?: AbortSignal): AbortSignal {
+function combineSignals(timeoutMs: number, explicitSignal?: AbortSignal | null): AbortSignal {
   const timeoutSig = makeTimeoutSignal(timeoutMs)
   if (!explicitSignal) {
     return timeoutSig || new AbortController().signal

@@ -2481,7 +2481,15 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
           let res
           if (isCustom) {
             const ep = (controller.getSnapshot().config?.custom_compatible || []).find(c => c.id === id)
-            res = await controller.testConnection('custom_api', ep)
+            const accountConfig: AccountConfigItem | undefined = ep === undefined ? undefined : {
+              id: ep.id,
+              provider: 'custom_api',
+              name: ep.name,
+              apiKey: ep.apiKey,
+              baseUrl: ep.baseUrl,
+              extra: { balancePath: ep.balancePath },
+            }
+            res = await controller.testConnection('custom_api', accountConfig)
           } else {
             res = await controller.testConnection(id)
           }
@@ -2986,15 +2994,16 @@ export function renderQuotaApp(container: HTMLElement, controller: QuotaControll
         if (!activeDrawerTarget) return
         const currentCfg = controller.getSnapshot().config || {}
 
-        if (activeDrawerTarget.kind === 'custom') {
-          const targetEp = activeDrawerTarget.endpoint
+        const drawerTarget = activeDrawerTarget
+        if (drawerTarget.kind === 'custom') {
+          const targetEp = drawerTarget.endpoint
           confirmModal({
             title: '确认删除中转站',
             content: `确定要删除中转端点「${targetEp.name}」吗？删除后将从列表中彻底移除。`,
             confirmText: '确认删除',
             onConfirm: async () => {
               const endpoints = [...(currentCfg.custom_compatible || [])]
-              endpoints.splice(activeDrawerTarget.index, 1)
+              endpoints.splice(drawerTarget.index, 1)
               const enabledProviders = (currentCfg.enabledProviders || []).filter(id => id !== targetEp.id)
               const floatingHudProviders = (currentCfg.floatingHudProviders || []).filter(id => id !== targetEp.id)
               const providerOrder = (currentCfg.providerOrder || []).filter(id => id !== targetEp.id)

@@ -69,7 +69,7 @@ Git 标签必须严格遵循带 `v` 前缀的格式，例如 `v0.1.0`、`v0.1.1`
 在创建版本 Git 标签之前，必须满足以下所有门禁条件：
 
 1. **代码与工作区整洁**：所有开发代码已通过审查并提交至 `main` 分支，工作区无未提交的脏更改。
-2. **构建与测试通过**：运行 `npm run build` 与 `npm test`，确保 `lib/` 产物可复现（CI 会执行 `git diff --exit-code -- lib/`）且全量测试通过。
+2. **类型检查、构建与测试通过**：运行 `npm run typecheck`、`npm run build` 与 `npm test`，确保 `tsc --noEmit` 无错误、`lib/` 产物可复现（CI 会执行 `git diff --exit-code -- lib/`）且全量测试通过。
 3. **版本元数据一致**：`package.json`、`CHANGELOG.md`、`README.md` 中的版本号完全一致。
 4. **自动化校验脚本通过**（跨平台 Node 脚本，CI 与本机一致）：
    ```bash
