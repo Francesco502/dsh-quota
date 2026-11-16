@@ -1,10 +1,10 @@
 # @francescoli/dsh-quota: DSH AI 额度与用量监控插件
 
-[![version](https://img.shields.io/badge/version-v0.4.4-blue.svg)](./package.json)
+[![version](https://img.shields.io/badge/version-v0.4.6-blue.svg)](./package.json)
 [![npm](https://img.shields.io/badge/npm-@francescoli/dsh--quota-CB3837.svg)](https://www.npmjs.com/package/@francescoli/dsh-quota)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-> 当前版本：**v0.4.4**
+> 当前版本：**v0.4.6**
 
 专门为 **DeepSeek Harness (DSH)** 打造的全功能 AI 服务额度、余额与用量监控插件。集中监控并展示 **DeepSeek 官方平台**、**Cursor**、**Codex (ChatGPT)**、**Google Antigravity**、**GitHub Copilot**、**OpenAI Platform**、**Anthropic Claude**、**Kimi**、**智谱 GLM**、**MiniMax**、**阿里通义千问**、**火山方舟**、**OpenCode-Go** 及 **OneAPI / NewAPI** 兼容中转的实时剩余额度、用量、充值余额、消耗速率及重置周期。
 
@@ -39,14 +39,27 @@
 
 ---
 
-## 🆕 v0.4.4 更新要点
+## 🆕 v0.4.6 更新要点
 
-- **一级导航「额度监控」**：新增根作用域 `sidebar.panellist` 入口与同名 `main` 主面板，和搜索/插件/自动化任务同级；`ctx.layout.selectPanel('quota')` 负责选中，底部快捷入口与 HUD 的「打开面板」也走同一条路径。旧宿主没有 slots/layout 时仍回退到覆盖层与 DOM 入口。
-- **侧栏显隐联动**：dsh-claude-style 的「更多 → 编辑侧栏…」会自动枚举该入口，可勾选显示/隐藏，并沿用其 `sidebarHidden` 设置。
-- **面板版本号修正**：标题版本标签不再硬编码，改为读取 `PLUGIN_VERSION`，本次界面显示 `v0.4.4`。
-- **HUD 配色回归面板语义色**：圆环改为品牌色（`--q-brand`）+ 中性轨道（`--q-track`），不再整环绿/黄/红；状态色只保留在 5px 告警点与卡片内文字，深浅色分别校准。
-- **HUD 文字自适应**：字号按球径 `clamp()` 缩放（46px / 贴边 38px 微缩），长金额缩写成 `K/M/B` 或省略号；`0%`、`100%`、`123%`、`9.99GB`、中英混排与深色主题下均不溢出。
-- **面板滚动与高度**：新增 `data-dsh-quota-mode="panel|overlay"` 区分渲染模式，主面板使用 `height:100%; overflow-y:auto`，不再依赖 `panelOpen` 状态。
+- **修复中文界面侧栏入口显示英文 `Quota Monitor`**：插件重载时宿主已存在同名 locale 命名空间，重复注册被当成失败后直接回落英文；同时宿主逐键回落的英文结果覆盖了插件自己的中文词典。现在重复注册只记录警告并继续绑定，且宿主活动语言为中文时直接使用插件自带中文词典。以下为 0.4.5 的界面调整。
+- **取消侧栏底部「…」浮层里的二级入口**：不再注册 `sidebar.footer.action`。一级导航「额度监控」本身已能直达面板；而在 dsh-claude-style 等把底部动作收进左下角「…」浮层的主题里，旧入口会在浮层里再出现一行「额度监控」，读起来像同一面板的二级菜单。本次移除该入口，只保留一级导航与折叠轨 Badge。
+- **悬停明细区分「服务 · 模型」**：明细行仍是单行，改为「服务缩写（`AGY`）· 模型/分组（加粗主色）| 额度类型 | 剩余值」。模型名占据主要宽度，`Gemini Models` 与 `Claude and GPT models` 不再被服务全名挤成省略号；分组标题里重复的服务名会被压掉（`Cursor Plan Usage` → `Plan Usage`）。完整名称仍保留在行 `title` 与读屏文案里。
+- **悬浮球标签按「模型 · 窗口」命名**：球内小标签不再固定为服务商缩写；Antigravity 显示 `GEM·周`、`GEM·5h`、`CLD·周`、`CLD·5h`，OpenCode Go 显示 `OPN·5h`、`OPN·周`、`OPN·月`；四位缩写（`FAST`/`AGNT`）本身已能区分窗口，不再追加后缀。标签超宽时缩小字号并以省略号收尾，悬停可看完整名称；读屏文案同步带出模型/分组名。
+- **窗口标签说人话**：`5-Hour Rolling Limit` 不再显示为「滚动」，按长度显示 `5h`；请求类/模型类窗口分别显示「请求」「模型」，不再出现含义不明的「量」。
+- **明细行的命名规则**：通用分组（`Plan Usage` / `Plan Limits`）改用窗口名 `5h Limits` / `Weekly Limits` / `Monthly Limits`；`Claude and GPT models` 显示为 `Claude/GPT Models`；行内文字已经写明窗口时不再重复显示药丸标签。
+- **连通性窗口不再进入轮播**：只有 liveness 的窗口（如 Claude 的「速率余量」）没有额度数字，已从 HUD 明细与轮播中移除；若某个服务只有连通性，悬浮球显示「暂无可展示额度」而不是误报未连接。
+
+<details>
+<summary>v0.4.4（历史）</summary>
+
+- 一级导航「额度监控」：`sidebar.panellist` 入口 + 同名 `main` 主面板，`ctx.layout.selectPanel('quota')` 负责选中。
+- 侧栏显隐联动：dsh-claude-style 的「更多 → 编辑侧栏…」自动枚举该入口。
+- 面板版本号改为读取 `PLUGIN_VERSION`。
+- HUD 配色回归面板语义色（品牌色圆环 + 中性轨道），状态色只用于告警点与卡片文字。
+- HUD 字号随球径 `clamp()` 缩放，长金额缩写成 `K/M/B`。
+- 面板模式改为 `height:100%; overflow-y:auto`，不再依赖 `panelOpen`。
+
+</details>
 
 ---
 
@@ -78,7 +91,7 @@ dsh plugin --profile web add github:Francesco502/dsh-quota
 1. 安装并**启动一次** DeepSeek Harness Desktop，让它初始化 `$DSH_HOME/profiles/desktop`，然后**完全退出**应用；
 2. 用 **Desktop 自带的命令运行时**（不是 Homebrew / npm 安装的 `dsh`）执行：
    ```bash
-   dsh plugin --profile desktop add @francescoli/dsh-quota@0.4.4
+   dsh plugin --profile desktop add @francescoli/dsh-quota@0.4.6
    ```
 3. 重新打开 Desktop。
 
@@ -93,7 +106,7 @@ npm ci
 npm run typecheck    # tsc --noEmit（host 类型走 types/dsh-shims.d.ts）
 npm run build        # esbuild 产出 lib/index.js + lib/client.js（含 source map）
 npm test             # 类型检查 + legacy 套件 + node:test 全量用例
-npm run validate:release -- --tag v0.4.4
+npm run validate:release -- --tag v0.4.6
 ```
 
 ---

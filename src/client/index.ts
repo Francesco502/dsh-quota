@@ -8,7 +8,7 @@
  * without the slots service.
  *
  * @package dsh-quota
- * @version 0.4.4
+ * @version 0.4.6
  */
 import { QuotaClientApi } from './api.ts'
 import { QuotaController } from './controller.ts'

@@ -9,7 +9,11 @@
  *  - `sidebar.panellist`     first-class global panel row (`quota`)
  *  - `main`                  the dashboard as the main panel (`key: quota`)
  *  - `sidebar.toggle.badge`  alert badge on the collapsed rail
- *  - `sidebar.footer.action` quick jump next to Settings (legacy hosts)
+ *
+ * `sidebar.footer.action` is deliberately not registered: the first-class panel
+ * row already reaches the dashboard, and modern shells collapse footer actions
+ * into the sidebar foot's "…" popover, where the extra row read as a nested
+ * second-level menu for the same panel (v0.4.5).
  *
  * Every host call is best-effort: a missing seat must degrade, never throw.
  */
@@ -24,7 +28,7 @@ export interface SlotWiring {
   react: any
   controller: QuotaController
   t: QuotaTranslate
-  /** Selects a main panel; when absent the footer shortcut is not registered. */
+  /** Selects a main panel; the HUD's "打开面板" falls back to the legacy overlay when absent. */
   selectPanel?: (id: string) => boolean | void
 }
 
@@ -44,17 +48,6 @@ function ensureSlotStyles(): void {
       background: var(--dsw-alias-state-error-primary, #B04A46); color: #fff;
       font-size: 10px; font-weight: 600; line-height: 1;
     }
-    .dsh-quota-footer-action {
-      display: flex; align-items: center; gap: 8px; width: 100%;
-      min-height: 32px; padding: 6px 8px; margin: 0;
-      background: transparent; border: none; border-radius: 8px;
-      color: var(--dsw-alias-label-primary, #1f2328); cursor: pointer;
-      font: inherit; font-size: 13px; text-align: left;
-    }
-    .dsh-quota-footer-action:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.06)); }
-    .dsh-quota-footer-action[data-wide='false'] { justify-content: center; padding: 6px; }
-    .dsh-quota-footer-action .dsh-quota-footer-label { white-space: nowrap; }
-    .dsh-quota-footer-action[data-wide='false'] .dsh-quota-footer-label { display: none; }
   `
   document.head.appendChild(style)
 }
@@ -192,41 +185,13 @@ export function registerQuotaSlots(ctx: any, wiring: SlotWiring): (() => void) |
   }
 
   // ---- sidebar footer shortcut -----------------------------------------
-  const QuotaFooterAction = (props: { wide?: boolean }) => {
-    const wide = props?.wide !== false
-    return react.createElement(
-      'button',
-      {
-        type: 'button',
-        className: 'dsh-quota-footer-action',
-        'data-wide': wide ? 'true' : 'false',
-        title: t('footer.open'),
-        'aria-label': t('footer.open'),
-        onClick: () => {
-          try {
-            // Slot hosts own panel selection; only the legacy overlay keeps the
-            // controller's open/close state.
-            if (typeof wiring.selectPanel === 'function') {
-              wiring.selectPanel(PANEL_ID)
-              return
-            }
-            const open = controller.getSnapshot().panelOpen
-            if (open) controller.close()
-            else controller.open()
-          } catch (error) {
-            console.warn('[dsh-quota] panel toggle failed:', (error as Error)?.message ?? error)
-          }
-        },
-      },
-      gaugeIcon(react, 16, false),
-      react.createElement('span', { className: 'dsh-quota-footer-label' }, t('footer.open')),
-    )
-  }
+  // Intentionally omitted in v0.4.5. The panel row above owns navigation; a
+  // footer action rendered as a second entry inside the sidebar foot's "…"
+  // popover only repeated the same panel as a nested menu row.
 
   register('sidebar.panellist', { id: PANEL_ID, order: 10, label: () => t('footer.open') }, QuotaPanelIcon)
   register('main', { key: PANEL_ID }, QuotaMainPanel)
   register('sidebar.toggle.badge', {}, QuotaBadge)
-  register('sidebar.footer.action', { id: 'dsh-quota-footer', order: 20 }, QuotaFooterAction)
 
   // `slots.inject` may defer the callback until the seat's declaring entry is
   // ready, so a seat can register after `apply()` returns. Return a working

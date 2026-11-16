@@ -6,7 +6,7 @@
  * so the bundle keeps the same named exports the previous hand-concatenated build had.
  *
  * @package dsh-quota
- * @version 0.4.4
+ * @version 0.4.6
  */
 export { apply, inject, VERSION } from './index.ts'
 

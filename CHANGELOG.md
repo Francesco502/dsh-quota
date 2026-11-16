@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-16
+
+### Fixed
+- **中文界面侧栏入口显示英文 `Quota Monitor`**：locale 命名空间在插件重载时已存在，`locale.register` 抛出重复注册错误后被当成「无翻译」直接回落英文；同时宿主 `bind` 的逐键回落也会在键缺失时给出英文。现在重复注册只记录警告并继续 `bind`，且宿主活动 locale 为 `zh` 时直接用插件自带中文词典。
+
+## [0.4.5] - 2026-11-16
+
+### Changed
+- **取消左下角「…」浮层里的二级入口**：不再注册 `sidebar.footer.action`。一级导航「额度监控」已能直达面板；在 dsh-claude-style 等把底部动作收进侧栏底部「…」浮层的主题里，旧入口会在浮层里再出现一行「额度监控」，读作同一面板的二级菜单。保留 `sidebar.panellist`、`main` 与折叠轨 Badge。
+- **HUD 悬停明细改为一行的「服务 · 模型/窗口」**：行首为服务缩写（`AGY`），模型/分组占据主要宽度并以主色加粗；通用分组改用窗口名（`5h Limits` / `Weekly Limits` / `Monthly Limits`），Cursor 显示 `Fast Requests` / `Other Models`，`Claude and GPT models` 显示为 `Claude/GPT Models`；行内文字已写明窗口时隐藏重复的药丸标签。
+- **悬浮球标签按「模型·窗口」区分**：Antigravity 显示 `GEM·周` / `GEM·5h` / `CLD·周` / `CLD·5h`，OpenCode Go 显示 `OPN·5h` / `OPN·周` / `OPN·月`；四位标签（`FAST` / `AGNT`）本身已能区分窗口，不再追加后缀。超宽时缩小字号并以省略号收尾，悬停显示完整名称，读屏文案同步带出模型/分组。
+- **窗口标签说人话**：`5-Hour Rolling Limit` 不再显示为「滚动」，按长度显示 `5h`；请求类/模型类窗口分别显示「请求」「模型」，仅连通性显示「连通」，不再出现含义不明的「量」。
+
+### Removed
+- **连通性窗口不再进入 HUD 轮播与明细**：只有 liveness 的窗口（如 Claude 的「速率余量」）没有额度数字，已跳过；若某个服务只有连通性，悬浮球显示「暂无可展示额度」而不是误报未连接。
+
+
 ## [0.4.4] - 2026-11-09
 
 ### Added

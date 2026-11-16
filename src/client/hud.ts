@@ -10,7 +10,9 @@ interface HudMetric {
   name: string
   /** Service display name for a popover row (ellipsised when the row is too narrow). */
   service: string
-  /** Short metric label: 余额 / 5h / 周 / 月 / 滚动 / 量. */
+  /** Model or quota group (e.g. `Gemini Models`); empty for plain balance cards. */
+  model: string
+  /** Short metric label: 余额 / 连通 / 5h / 周 / 月 / 请求 / 模型 / 配额 / 状态. */
   shortLabel: string
   tag: string
   kind: QuotaKind
@@ -44,7 +46,7 @@ function isQuantifiedMetric(metric: HudMetric): boolean {
 function metricValueText(metric: HudMetric): string {
   if (isQuantifiedMetric(metric)) return `${Math.round(metric.remainingPercent!)}% 剩余`
   if (metric.kind === 'balance') return metric.amountText || '—'
-  if (metric.kind === 'liveness') return '仅连通性'
+  if (metric.kind === 'liveness') return '正常'
   return '未知'
 }
 
@@ -87,23 +89,45 @@ export function compactHudAmount(text: string): string {
  * label/id so legacy windows (no `windowKind`) still land on the right bucket.
  */
 function inferMetricShortLabel(window: MetricWindow): string {
-  if (windowQuotaKind(window) === 'balance') return '余额'
+  const kind = windowQuotaKind(window)
+  if (kind === 'balance') return '余额'
+  if (kind === 'liveness') return '连通'
+
+  // A window can be structurally "sliding" and still name its length
+  // (OpenCode Go's `5-Hour Rolling Limit`). The length is what a user can act
+  // on, so the text hint wins over the storage enum; the generic 「滚动」 only
+  // remains for a sliding window that never says how long it is.
+  const text = `${window.label || ''} ${window.id || ''}`.toLowerCase()
+  if (/(^|[^0-9])5\s*[- ]?h|5\s*小时|five[\s-]?hour/.test(text)) return '5h'
+  if (/weekly|week|周/.test(text)) return '周'
+  if (/monthly|month|月度|月/.test(text)) return '月'
+  if (/daily|24\s*h|day|日/.test(text)) return '日'
 
   switch (window.windowKind) {
     case '5h': return '5h'
     case 'weekly': return '周'
     case 'monthly': return '月'
-    case 'sliding': return '滚动'
+    case 'sliding': return '近期'
     default: break
   }
 
-  const text = `${window.label || ''} ${window.id || ''}`.toLowerCase()
-  if (/(^|[^0-9])5\s*[- ]?h|5\s*小时|five[\s-]?hour/.test(text)) return '5h'
-  if (/weekly|week|周/.test(text)) return '周'
-  if (/monthly|month|月度|月/.test(text)) return '月'
-  if (/slid|roll|滚动|滑动/.test(text)) return '滚动'
+  if (/request|请求/.test(text)) return '请求'
+  if (/model|模型/.test(text)) return '模型'
   if (/balance|余额/.test(text)) return '余额'
-  return '量'
+  return kind === 'unknown' ? '状态' : '配额'
+}
+
+/** True when the row's model text already states what the pill would repeat. */
+function pillRedundant(model: string, shortLabel: string): boolean {
+  const text = model.toLowerCase()
+  switch (shortLabel) {
+    case '5h': return /5\s*[- ]?h|5-hour/.test(text)
+    case '周': return /weekly|week|周/.test(text)
+    case '月': return /monthly|month|月/.test(text)
+    case '请求': return /request|请求/.test(text)
+    case '模型': return /model|模型/.test(text)
+    default: return false
+  }
 }
 
 function statusTone(remainingPercent: number): StatusTone {
@@ -127,15 +151,17 @@ function decodeHudText(value: string): string {
 
 function metricAriaText(metric: HudMetric): string {
   const service = decodeHudText(metric.service)
-  const label = metric.shortLabel === '量' ? '' : `${metric.shortLabel} `
+  const model = typeof metric.model === 'string' && metric.model !== '' ? ` ${decodeHudText(metric.model)}` : ''
+  const subject = `${service}${model}`
+  const label = metric.shortLabel === '量' || (metric.model !== '' && pillRedundant(metric.model, metric.shortLabel)) ? '' : `${metric.shortLabel} `
   if (isQuantifiedMetric(metric)) {
     const percent = Math.round(metric.remainingPercent!)
-    if (percent <= 0) return `${service} ${label}剩余 0%，额度已耗尽`
-    return `${service} ${label}剩余 ${percent}%`
+    if (percent <= 0) return `${subject} ${label}剩余 0%，额度已耗尽`
+    return `${subject} ${label}剩余 ${percent}%`
   }
-  if (metric.kind === 'balance') return `${service} 余额 ${decodeHudText(metric.amountText || '未知')}`
-  if (metric.kind === 'liveness') return `${service} 仅连通性，未提供额度接口`
-  return `${service} 额度状态未知`
+  if (metric.kind === 'balance') return `${subject} 余额 ${decodeHudText(metric.amountText || '未知')}`
+  if (metric.kind === 'liveness') return `${subject} 仅连通性，未提供额度接口`
+  return `${subject} 额度状态未知`
 }
 
 interface HudPosition {
@@ -400,15 +426,20 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
       display: inline-flex;
       align-items: center;
       gap: 3px;
-      max-width: calc(var(--hud-size) - 12px);
+      max-width: calc(var(--hud-size) - 10px);
       overflow: hidden;
       white-space: nowrap;
+      text-overflow: ellipsis;
       font-size: clamp(6.5px, calc(var(--hud-size) * 0.185), 8.5px);
       font-weight: 600;
       color: var(--q-fg-2);
       margin-top: 1.5px;
       text-transform: uppercase;
       letter-spacing: 0.2px;
+    }
+    [data-dsh-quota-hud] .dsh-hud-tag.is-compact {
+      font-size: clamp(6px, calc(var(--hud-size) * 0.16), 7.6px);
+      letter-spacing: 0;
     }
     [data-dsh-quota-hud] .dsh-hud-status-dot {
       flex: none;
@@ -511,7 +542,7 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
     [data-dsh-quota-hud] .dsh-hud-popover-row {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 4px;
       min-width: 0;
       padding: 2px 4px;
       margin: 0 -4px;
@@ -523,6 +554,14 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
       background: var(--q-scrim);
     }
     [data-dsh-quota-hud] .dsh-hud-popover-service {
+      flex: none;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      color: var(--q-fg-2);
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-model {
       flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
@@ -530,6 +569,10 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
       white-space: nowrap;
       font-weight: 600;
       color: var(--q-fg);
+    }
+    [data-dsh-quota-hud] .dsh-hud-popover-divider {
+      flex: 0 0 auto;
+      color: var(--q-border);
     }
     [data-dsh-quota-hud] .dsh-hud-popover-metric {
       flex: none;
@@ -857,7 +900,8 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
     motionQuery.addEventListener('change', onMotionPreferenceChange)
   }
 
-  // Tag helper
+  // Tag helper: the provider tag alone cannot tell Antigravity's Gemini quota
+  // from its Claude/GPT quota, so a group-aware tag wins where one exists.
   function getProviderTag(provider: string): string {
     const map: Record<string, string> = {
       deepseek: 'DSK',
@@ -876,6 +920,25 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
       custom_api: 'API',
     }
     return map[provider] || provider.slice(0, 3).toUpperCase()
+  }
+
+  /**
+   * Dial tag for one metric. The provider tag stays the fallback; a group or
+   * window that names a model wins so the carousel's single line identifies
+   * which model's quota is on screen (`GEM`, `CLD`, `FAST`, `AGNT`).
+   */
+  function getModelTag(provider: string, groupTitle: string, window: MetricWindow): string {
+    const group = groupTitle.toLowerCase()
+    const windowId = (window.id || '').toLowerCase()
+    if (provider === 'antigravity') {
+      if (group.includes('gemini') || windowId.includes('gemini')) return 'GEM'
+      if (group.includes('claude') || group.includes('gpt') || windowId.includes('claude')) return 'CLD'
+    }
+    if (provider === 'cursor') {
+      if (windowId === 'cursor-auto') return 'FAST'
+      if (windowId === 'cursor-named') return 'AGNT'
+    }
+    return getProviderTag(provider)
   }
 
   function isMetricSelected(cardProvider: string, cardId: string, groupTitle: string, windowId: string, selectedMetrics?: string[]): boolean {
@@ -920,6 +983,50 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
     return false
   }
 
+  /** Drop trailing parentheticals so a window label can name a row: `Fast Requests (Cursor 核心模型)` → `Fast Requests`. */
+  function compactWindowLabel(label: string): string {
+    const text = typeof label === 'string' ? label.trim() : ''
+    if (text === '') return text
+    return text.replace(/\s*[（(][^）)]*[）)]\s*/g, ' ').trim()
+  }
+
+  /**
+   * Drop a leading service name from a group title so the model column keeps
+   * the words that differ between rows: `Cursor Plan Usage` reads `Plan Usage`
+   * and `OpenCode Go Plan Limits` reads `Plan Limits`, while
+   * `Gemini Models` / `Claude and GPT models` stay untouched.
+   */
+  function compactModelLabel(model: string, service: string): string {
+    const text = model.trim()
+    const name = service.trim()
+    if (text === '' || name === '') return text
+    if (text.toLowerCase().startsWith(`${name.toLowerCase()} `)) {
+      const rest = text.slice(name.length + 1).trim()
+      if (rest !== '') return rest
+    }
+    return text
+  }
+
+  /** `Claude and GPT models` reads better as `Claude/GPT Models` in a narrow HUD row. */
+  function normalizeModelText(text: string): string {
+    return text.replace(/claude\s+and\s+gpt\s+models/i, 'Claude/GPT Models')
+  }
+
+  /** Window name used when a group title is too generic to name its rows. */
+  function windowDisplayName(window: MetricWindow): string {
+    const text = compactWindowLabel(window.label)
+    const lower = text.toLowerCase()
+    if (/(^|[^0-9])5\s*[- ]?h|5\s*小时|five[\s-]?hour/.test(lower)) return '5h Limits'
+    if (/weekly|week|周/.test(lower)) return 'Weekly Limits'
+    if (/monthly|month|月度|月/.test(lower)) return 'Monthly Limits'
+    return text
+  }
+
+  /** `Plan Usage` / `Plan Limits` say nothing about which window a row is. */
+  function isGenericGroup(text: string): boolean {
+    return /^plan\b/i.test(text.trim())
+  }
+
   function formatBalanceAmount(card: AuthCardItem): string | undefined {
     const balance = card.balance
     if (!balance || typeof balance.remaining !== 'number' || !Number.isFinite(balance.remaining)) return undefined
@@ -935,7 +1042,7 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
     const hudProviders = config?.floatingHudProviders
     const selectedMetrics = config?.floatingHudMetrics
 
-    const toMetric = (card: AuthCardItem, tag: string, groupTitle: string, window: MetricWindow): HudMetric => {
+    const toMetric = (card: AuthCardItem, groupTitle: string, window: MetricWindow, model: string = groupTitle): HudMetric => {
       const kind = windowQuotaKind(window)
       const quantified = isQuantified(window)
       const amountText = typeof window.amountText === 'string' ? window.amountText.trim() : ''
@@ -944,8 +1051,9 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
         provider: card.provider,
         name: `${card.name} · ${groupTitle} · ${window.label}`,
         service: card.name,
+        model,
         shortLabel: inferMetricShortLabel(window),
-        tag,
+        tag: getModelTag(card.provider, groupTitle, window),
         kind,
         remainingPercent: quantified ? Math.max(0, Math.min(100, Math.round(window.remainingPercent))) : undefined,
         amountText: kind === 'balance' ? (amountText !== '' ? amountText : formatBalanceAmount(card)) : undefined,
@@ -976,6 +1084,7 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
           provider: card.provider,
           name: `${card.name} · 账户余额`,
           service: card.name,
+          model: '',
           shortLabel: '余额',
           tag,
           kind: 'balance',
@@ -986,11 +1095,24 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
 
       const cardStartIndex = list.length
       for (const group of card.groups) {
+        // Two windows of one group can share a pill (Cursor's two monthly
+        // windows). Then the group title cannot name the row, so the window's
+        // own label does: `Fast Requests` / `Other Models`.
+        const pills = group.windows.map(window => inferMetricShortLabel(window))
+        const pillsCollide = new Set(pills).size < pills.length
+        // Keep maximum pills for the model selection below; this is about the
+        // group's own name being generic, independent of the window count.
+        const groupModel = compactModelLabel(group.title, card.name)
+        const useWindowName = isGenericGroup(groupModel) || pillsCollide
         for (const window of group.windows) {
+          // Connectivity-only windows carry no quota; they do not belong in a
+          // quota carousel (`CLD 连通 正常` was noise, not a number).
+          if (windowQuotaKind(window) === 'liveness') continue
           if (!isMetricSelected(card.provider, card.id, group.title, window.id, selectedMetrics)) {
             continue
           }
-          list.push(toMetric(card, tag, group.title, window))
+          const model = normalizeModelText(useWindowName ? windowDisplayName(window) : group.title)
+          list.push(toMetric(card, group.title, window, model))
         }
       }
 
@@ -998,8 +1120,14 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
       const hasExplicitNone = Array.isArray(selectedMetrics) && selectedMetrics.some(k => k === `${card.provider}::__none__` || k === `${card.id}::__none__`)
       if (list.length === cardStartIndex && !hasExplicitNone && card.groups.length > 0) {
         for (const group of card.groups) {
+          const pills = group.windows.map(window => inferMetricShortLabel(window))
+          const pillsCollide = new Set(pills).size < pills.length
+          const groupModel = compactModelLabel(group.title, card.name)
+          const useWindowName = isGenericGroup(groupModel) || pillsCollide
           for (const window of group.windows) {
-            list.push(toMetric(card, tag, group.title, window))
+            if (windowQuotaKind(window) === 'liveness') continue
+            const model = normalizeModelText(useWindowName ? windowDisplayName(window) : group.title)
+            list.push(toMetric(card, group.title, window, model))
           }
         }
       }
@@ -1065,8 +1193,14 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
 
     if (metrics.length === 0) {
       const hasMetricSelection = Array.isArray(state.config?.floatingHudMetrics)
-      const emptyTitle = hasMetricSelection ? '未选择额度' : '未连接服务'
-      const emptyHint = hasMetricSelection ? '请在设置中选择要显示的额度窗口' : '点击打开面板完成服务连接'
+      // A connected service that only reports liveness is not a connection
+      // problem: say there is no quota to show instead of "未连接服务".
+      const hasCards = Array.isArray(state.cards)
+        && state.cards.some(card => card.status === 'ok' || card.status === 'warn')
+      const emptyTitle = hasMetricSelection ? '未选择额度' : hasCards ? '暂无可展示额度' : '未连接服务'
+      const emptyHint = hasMetricSelection
+        ? '请在设置中选择要显示的额度窗口'
+        : hasCards ? '当前服务只提供连通性或不含额度数据' : '点击打开面板完成服务连接'
       setHudAriaLabel(`额度监控：${emptyTitle}。按 Enter 展开提示`)
       hudEl.innerHTML = `
         <div class="${circleClass}">
@@ -1096,6 +1230,18 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
     const exhausted = percent !== undefined && percent <= 0
     const tone = percent !== undefined ? statusTone(percent) : undefined
 
+    // The dial's tag line names the model group and the window it belongs to,
+    // so a four-metric Antigravity carousel reads as GEM·5h / GEM·周 / CLD·5h /
+    // CLD·周 instead of the same provider acronym four times.
+    // Only a short provider tag leaves room for the window suffix; a four-letter
+    // tag (FAST / AGNT) already tells the two Cursor windows apart on its own.
+    const showWindow = current.kind === 'usage'
+      && current.tag.length <= 3
+      && current.shortLabel !== '余额'
+      && current.shortLabel !== '连通'
+      && current.shortLabel !== '状态'
+    const ballTag = showWindow ? `${current.tag}·${current.shortLabel}` : current.tag
+
     const ariaText = metricAriaText(current)
     setHudAriaLabel(
       isPinned
@@ -1108,13 +1254,23 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
       const rowTone = quantifiedRow ? statusTone(m.remainingPercent!) : ''
       const valueClass = rowTone === '' ? 'dsh-hud-popover-val' : `dsh-hud-popover-val is-${rowTone}`
       const activeClass = index === activeIndex ? ' is-active' : ''
-      // Card/group/window text is escaped once at the controller boundary; escaping again here
-      // would render visible entities (`&amp;`). Service name is ellipsised by CSS and the
-      // full `service · group · window` text stays available through `title`.
+
+      // One line, two weights: `service · model` reads as one label, where the
+      // bold service anchors the row and the muted model/group says which quota
+      // of that service it is (Gemini Models vs Claude and GPT models).
+      // `m.model` is already escaped at the controller boundary; it names the
+      // group, or the window when several windows of that group share a pill.
+      const parts = m.name.split(' · ')
+      const modelDetail = compactModelLabel(m.model, parts[0] || '')
+      const displayModel = modelDetail === ''
+        ? ''
+        : `<span class="dsh-hud-popover-divider" aria-hidden="true">·</span><span class="dsh-hud-popover-model">${modelDetail}</span>`
+
       return `
         <div class="dsh-hud-popover-row${activeClass}" title="${m.name}">
-          <span class="dsh-hud-popover-service" title="${m.name}">${m.service}</span>
-          <span class="dsh-hud-popover-metric">${m.shortLabel}</span>
+          <span class="dsh-hud-popover-service">${getProviderTag(m.provider)}</span>
+          ${displayModel}
+          ${modelDetail !== '' && pillRedundant(modelDetail, m.shortLabel) ? '' : `<span class="dsh-hud-popover-metric">${m.shortLabel}</span>`}
           <span class="${valueClass}">${metricValueText(m)}</span>
         </div>
       `
@@ -1157,7 +1313,7 @@ export function mountQuotaHud(controller: QuotaController, options: HudMountOpti
         ${ringHtml}
         <div class="dsh-hud-content">
           ${centerHtml}
-          <span class="dsh-hud-tag">${current.tag}${statusDotHtml}</span>
+          <span class="dsh-hud-tag${ballTag.length > 4 ? ' is-compact' : ''}" title="${current.name}">${ballTag}${statusDotHtml}</span>
         </div>
       </div>
       <div class="${popoverClass}" role="group" aria-label="额度明细">
